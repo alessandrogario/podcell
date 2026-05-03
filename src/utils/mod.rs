@@ -6,12 +6,10 @@
 // the LICENSE file found in the root directory of this source tree.
 //
 
-#[allow(dead_code)]
 pub mod group;
-
-#[allow(dead_code)]
-pub mod passwd;
-
+pub mod host;
+pub mod mount;
 pub mod package_manager;
+pub mod passwd;
 pub mod podman;
 pub mod which;

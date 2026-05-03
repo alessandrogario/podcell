@@ -6,11 +6,15 @@
 // the LICENSE file found in the root directory of this source tree.
 //
 
-use crate::utils::podman::Podman;
+use crate::utils::{
+    host::{current_user_uid, validate_host_path},
+    mount::Mount,
+    podman::Podman,
+};
 
-use std::{os::unix::fs::PermissionsExt, path::PathBuf};
+use std::path::{Path, PathBuf};
 
-use clap::{arg, Args};
+use clap::Args;
 
 /// Create a new container.
 #[derive(Args)]
@@ -27,44 +31,85 @@ pub struct Arguments {
     #[arg(long, default_value_t = false, help = "Use the host network namespace")]
     host_network: bool,
 
-    /// Optional path to a shared folder to mount into the container.
-    /// The folder will be mounted at /mnt/shared inside the container.
+    /// Bind mount in the form HOST:CONTAINER[:MODE]. MODE is `ro` or `rw` (default `ro`).
+    /// Pass --mount multiple times to add multiple mounts.
     #[arg(
-        long,
-        value_name = "PATH",
-        help = "Path to a shared folder to mount into the container at /mnt/shared"
+        long = "mount",
+        value_name = "HOST:CONTAINER[:MODE]",
+        help = "Bind mount a host path into the container (repeatable)"
     )]
-    shared_folder: Option<PathBuf>,
+    mounts: Vec<Mount>,
 }
 
 /// Handler for the "create" command.
 pub fn run(args: Arguments) -> Result<(), Box<dyn std::error::Error>> {
-    if let Some(shared_folder) = &args.shared_folder {
-        std::fs::create_dir_all(shared_folder)?;
+    let user_uid = current_user_uid()?;
 
-        println!("\x1b[1mConfiguring shared folder permissions\x1b[0m");
-        std::fs::set_permissions(shared_folder, std::fs::Permissions::from_mode(0o777))?;
+    let mut prepared_mounts: Vec<Mount> = Vec::with_capacity(args.mounts.len());
 
-        let user = std::env::var("USER")?;
-        let status = std::process::Command::new("setfacl")
-            .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
-            .arg("-m")
-            .arg(format!("u:{user}:rwx"))
-            .arg(shared_folder)
-            .status()?;
-
-        if !status.success() {
-            return Err(format!("Failed to set ACL on {shared_folder:?}").into());
-        }
+    for mount in args.mounts {
+        let host = prepare_host_path(&mount.host, user_uid)?;
+        prepared_mounts.push(Mount {
+            host,
+            container: mount.container,
+            mode: mount.mode,
+        });
     }
 
     Podman::new()
         .create(
             args.host_network,
-            args.shared_folder,
+            &prepared_mounts,
             &args.distribution,
             &args.name,
         )
         .map_err(Into::into)
+}
+
+/// Validate and canonicalize a user-supplied host path.
+///
+/// Strict semantics: the path must already exist (we do not auto-create), it must be
+/// owned by the current user, and after canonicalization it must not contain any `:`
+/// characters (which would be misparsed by podman's `--volume HOST:CONTAINER:MODE`
+/// argument
+fn prepare_host_path(host: &Path, user_uid: u32) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    if !host.exists() {
+        return Err(format!(
+            "Mount host path '{}' does not exist. Create it before running `devshell create`.",
+            host.display()
+        )
+        .into());
+    }
+
+    validate_host_path(host, user_uid)?;
+
+    let canonical = host.canonicalize().map_err(|e| {
+        format!(
+            "Failed to canonicalize mount host path '{}': {e}",
+            host.display()
+        )
+    })?;
+
+    if let Some(s) = canonical.to_str() {
+        if s.contains(':') {
+            return Err(format!(
+                "Mount host path '{}' canonicalizes to '{s}', which contains ':' \
+                 and would be misparsed by podman's --volume argument.",
+                host.display()
+            )
+            .into());
+        }
+    } else {
+        return Err(format!(
+            "Mount host path '{}' canonicalizes to a non-UTF-8 path",
+            host.display()
+        )
+        .into());
+    }
+
+    // Re-validate ownership on the canonical path: a symlink might have pointed at a
+    // path with different ownership than the link itself.
+    validate_host_path(&canonical, user_uid)?;
+
+    Ok(canonical)
 }

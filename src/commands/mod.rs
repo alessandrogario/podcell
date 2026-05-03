@@ -11,3 +11,6 @@ pub mod enter;
 pub mod init;
 pub mod list;
 pub mod rm;
+pub mod shell;
+pub mod start;
+pub mod stop;

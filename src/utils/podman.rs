@@ -8,6 +8,7 @@
 
 use crate::utils::{
     group::{EtcGroup, EtcGroupError},
+    mount::{Mount, MountRenderError},
     passwd::{EtcPasswd, EtcPasswdError},
 };
 
@@ -64,10 +65,13 @@ pub enum PodmanError {
 
     #[error("passwd file error")]
     EtcPasswdError(#[from] EtcPasswdError),
+
+    #[error("failed to render mount as a podman --volume argument")]
+    MountRenderError(#[from] MountRenderError),
 }
 
 /// These states correspond to the lifecycle phases of a container as reported by Podman.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PodmanContainerState {
     /// The container has been created but not started.
     Created,
@@ -92,6 +96,28 @@ pub enum PodmanContainerState {
 
     /// The container is dead.
     Dead,
+}
+
+impl PodmanContainerState {
+    /// Lowercase string representation, matching the strings podman emits in `ps --format=json`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PodmanContainerState::Created => "created",
+            PodmanContainerState::Running => "running",
+            PodmanContainerState::Paused => "paused",
+            PodmanContainerState::Exited => "exited",
+            PodmanContainerState::Stopped => "stopped",
+            PodmanContainerState::Stopping => "stopping",
+            PodmanContainerState::Restarting => "restarting",
+            PodmanContainerState::Dead => "dead",
+        }
+    }
+}
+
+impl std::fmt::Display for PodmanContainerState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 impl std::str::FromStr for PodmanContainerState {
@@ -188,19 +214,78 @@ impl Podman {
         Ok(container_list)
     }
 
+    /// Returns the user-declared bind-mount source paths for a container by querying
+    /// `podman inspect`. Filters out our own binary mount at `/usr/bin/devshell`
+    pub fn list_user_bind_mount_sources(
+        &self,
+        container_id: &str,
+    ) -> Result<Vec<PathBuf>, PodmanError> {
+        let output = Command::new(PODMAN_EXECUTABLE_NAME)
+            .args(["inspect", "--type=container", container_id])
+            .stderr(std::process::Stdio::inherit())
+            .output()?;
+
+        if !output.status.success() {
+            return Err(PodmanError::CommandError(output.status));
+        }
+
+        let json: serde_json::Value = serde_json::from_str(&String::from_utf8(output.stdout)?)?;
+
+        let containers = json
+            .as_array()
+            .ok_or_else(|| PodmanError::InvalidJSONKeyType {
+                key_name: "(root)".to_owned(),
+                expected_type: "array".to_owned(),
+            })?;
+
+        let container = containers
+            .first()
+            .ok_or_else(|| PodmanError::NotFound(container_id.to_owned()))?;
+
+        let mounts = container
+            .get("Mounts")
+            .ok_or_else(|| PodmanError::MissingJSONKey("Mounts".to_owned()))?
+            .as_array()
+            .ok_or_else(|| PodmanError::InvalidJSONKeyType {
+                key_name: "Mounts".to_owned(),
+                expected_type: "array".to_owned(),
+            })?;
+
+        let mut sources = Vec::new();
+        for mount in mounts {
+            let mount_type = Self::get_json_object_string(mount, "Type")?;
+            if mount_type != "bind" {
+                continue;
+            }
+
+            let destination = Self::get_json_object_string(mount, "Destination")?;
+            if destination == DEVSHELL_MOUNT_PATH {
+                continue;
+            }
+
+            let source = Self::get_json_object_string(mount, "Source")?;
+            sources.push(PathBuf::from(source));
+        }
+
+        Ok(sources)
+    }
+
     /// Creates a new container.
+    ///
+    /// `mounts` are rendered as `--volume HOST:CONTAINER:MODE,z` flags. Host paths are
+    /// expected to already be canonicalized AND validated by the caller; this method does
+    /// no IO on them. Sources are recovered at `start` time by querying podman directly
+    /// (see `list_user_bind_mount_sources`), so no additional bookkeeping is needed here.
     pub fn create(
         &self,
         use_host_network: bool,
-        shared_folder: Option<PathBuf>,
+        mounts: &[Mount],
         distribution: &str,
         name: &str,
     ) -> Result<(), PodmanError> {
-        let mut cmd = Command::new("podman");
+        let mut cmd = Command::new(PODMAN_EXECUTABLE_NAME);
 
-        cmd.stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
-            .arg("run")
+        cmd.arg("run")
             .arg("--init")
             .arg("--tty")
             .arg("--interactive")
@@ -217,6 +302,8 @@ impl Podman {
 
         cmd.args(["--name", name])
             .args(["--hostname", name])
+            .arg("--userns=keep-id")
+            .arg("--user=0:0")
             .args(["--security-opt", "mask=/proc/acpi,/proc/kcore,/proc/keys"])
             .arg("--cap-drop=SYS_ADMIN,NET_ADMIN,SYS_MODULE,SYS_RAWIO,SYS_BOOT,MAC_ADMIN,MAC_OVERRIDE,SYSLOG,SYS_PTRACE,SYS_TIME")
             .arg("--cap-add=DAC_OVERRIDE,DAC_READ_SEARCH");
@@ -235,22 +322,9 @@ impl Podman {
         ])
         .args(["--entrypoint", DEVSHELL_MOUNT_PATH]);
 
-        if let Some(shared_folder) = shared_folder {
-            let shared_folder = shared_folder.canonicalize().map_err(|e| {
-                io::Error::other(format!(
-                    "Failed to canonicalize the shared folder path '{}': {e}",
-                    shared_folder.display()
-                ))
-            })?;
-
-            let shared_folder_str = shared_folder.to_str().ok_or_else(|| {
-                io::Error::other(format!(
-                    "Failed to convert the shared folder path '{}' to string",
-                    shared_folder.display()
-                ))
-            })?;
-
-            cmd.args(["--volume", &format!("{shared_folder_str}:/mnt/shared:rw")]);
+        for mount in mounts {
+            let volume = mount.to_volume_arg()?;
+            cmd.args(["--volume", &volume]);
         }
 
         match (
@@ -308,50 +382,72 @@ impl Podman {
         ))
     }
 
-    /// Enters an existing container.
-    pub fn enter(&self, container_name: &str) -> Result<(), PodmanError> {
-        let container_id = self
-            .list()?
+    /// Looks up a devshell-managed container by name. Returns the full container record
+    /// (id + state + image info) so callers can make state decisions without re-querying.
+    pub fn find_by_name(&self, container_name: &str) -> Result<PodmanContainer, PodmanError> {
+        self.list()?
             .into_iter()
-            .find_map(|container| {
-                if container.name_list.contains(&container_name.to_owned()) {
-                    Some(container.id)
-                } else {
-                    None
-                }
-            })
-            .ok_or_else(|| PodmanError::NotFound(container_name.to_owned()))?;
+            .find(|container| container.name_list.iter().any(|n| n == container_name))
+            .ok_or_else(|| PodmanError::NotFound(container_name.to_owned()))
+    }
 
-        let err = Command::new("podman")
+    /// Starts an existing container without attaching. Blocks until the container is up.
+    ///
+    /// Returns rather than `exec`-replacing because the caller may want to print
+    /// status afterwards (e.g. an "already running" notice or post-start diagnostics).
+    pub fn start(&self, container_id: &str) -> Result<(), PodmanError> {
+        let status = Command::new(PODMAN_EXECUTABLE_NAME)
             .arg("start")
-            .args(["--attach", "--interactive"])
             .arg(container_id)
-            .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
+            .status()?;
+
+        if !status.success() {
+            return Err(PodmanError::CommandError(status));
+        }
+
+        Ok(())
+    }
+
+    /// Stops a running container. Blocks until SIGTERM-then-SIGKILL completes.
+    ///
+    /// Returns rather than `exec`-replacing because the caller may want to print
+    /// status afterwards (e.g. an "already stopped" notice or post-stop diagnostics).
+    pub fn stop(&self, container_id: &str) -> Result<(), PodmanError> {
+        let status = Command::new(PODMAN_EXECUTABLE_NAME)
+            .arg("stop")
+            .arg(container_id)
+            .status()?;
+
+        if !status.success() {
+            return Err(PodmanError::CommandError(status));
+        }
+
+        Ok(())
+    }
+
+    /// Execs a command inside a running container, replacing the current process.
+    /// Always allocates a TTY and connects stdin so the user can interact with the command.
+    pub fn exec_interactive(
+        &self,
+        container_id: &str,
+        command: &[&str],
+    ) -> Result<(), PodmanError> {
+        let err = Command::new(PODMAN_EXECUTABLE_NAME)
+            .arg("exec")
+            .arg("--tty")
+            .arg("--interactive")
+            .arg(container_id)
+            .args(command)
             .exec();
 
         Err(PodmanError::IOError(err))
     }
 
-    /// Deletes an existing container.
-    pub fn rm(&self, container_name: &str) -> Result<(), PodmanError> {
-        let container_id = self
-            .list()?
-            .into_iter()
-            .find_map(|container| {
-                if container.name_list.contains(&container_name.to_owned()) {
-                    Some(container.id)
-                } else {
-                    None
-                }
-            })
-            .ok_or_else(|| PodmanError::NotFound(container_name.to_owned()))?;
-
-        let err = Command::new("podman")
+    /// Deletes a container by id. Replaces the current process with `podman rm`.
+    pub fn rm_by_id(&self, container_id: &str) -> Result<(), PodmanError> {
+        let err = Command::new(PODMAN_EXECUTABLE_NAME)
             .arg("rm")
             .arg(container_id)
-            .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
             .exec();
 
         Err(PodmanError::IOError(err))
