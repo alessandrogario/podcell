@@ -10,27 +10,26 @@ use crate::utils::podman::{Podman, PodmanContainerState};
 
 use clap::Args;
 
-/// Delete an existing container.
+/// Stop a running container.
 #[derive(Args)]
 pub struct Arguments {
-    /// The name of the container to delete.
+    /// The name of the container to stop.
     #[arg()]
     name: String,
 }
 
-/// Handler for the "rm" command.
+/// Handler for the "stop" command.
 pub fn run(args: Arguments) -> Result<(), Box<dyn std::error::Error>> {
     let podman = Podman::new();
     let container = podman.find_by_name(&args.name)?;
 
-    if container.state == PodmanContainerState::Running {
-        return Err(format!(
-            "Container '{name}' is in state '{state}'. Run `devshell stop {name}` first.",
-            name = args.name,
-            state = container.state,
-        )
-        .into());
+    if container.state != PodmanContainerState::Running {
+        println!(
+            "Container '{}' is in state '{}', nothing to stop.",
+            args.name, container.state
+        );
+        return Ok(());
     }
 
-    podman.rm_by_id(&container.id).map_err(Into::into)
+    podman.stop(&container.id).map_err(Into::into)
 }

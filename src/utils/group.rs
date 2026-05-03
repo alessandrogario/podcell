@@ -26,7 +26,6 @@ pub enum EtcGroupError {
 pub struct Group {
     pub name: String,
     pub id: u32,
-    pub user_list: Vec<String>,
 }
 
 pub struct EtcGroup {
@@ -38,14 +37,6 @@ impl EtcGroup {
         Ok(Self {
             group_list: Self::parse_file(path)?,
         })
-    }
-
-    pub fn len(&self) -> usize {
-        self.group_list.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.group_list.is_empty()
     }
 
     pub fn iter(&self) -> std::slice::Iter<'_, Group> {
@@ -66,15 +57,9 @@ impl EtcGroup {
                 return Err(EtcGroupError::InvalidEntryFormat);
             }
 
-            let user_list: Vec<String> = field_list[3]
-                .split(',')
-                .map(|user_name| user_name.to_owned())
-                .collect();
-
             let group = Group {
                 name: field_list[0].to_string(),
                 id: field_list[2].parse().unwrap_or(0),
-                user_list,
             };
 
             group_list.push(group);
