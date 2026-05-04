@@ -8,7 +8,15 @@
 
 use crate::utils::{group::EtcGroup, package_manager::PackageManager, passwd::EtcPasswd};
 
-use std::{io, os::unix::process::CommandExt, path::Path, process::Command};
+use std::{
+    fs, io,
+    os::unix::{
+        fs::{chown, MetadataExt},
+        process::CommandExt,
+    },
+    path::Path,
+    process::Command,
+};
 
 use clap::Args;
 
@@ -173,8 +181,48 @@ fn initialize() -> std::io::Result<()> {
         )));
     }
 
+    // If a `--mount` destination lives under /home/$USERNAME, podman pre-creates the
+    // parent directories as root before init runs. `useradd --create-home` then sees
+    // /home/$USERNAME already exists and skips both the directory creation AND the
+    // skel copy. The cp above also runs as root, so the skel-derived dotfiles end up
+    // root-owned. Recursively chown the home tree to fix both at once, but stay on
+    // the home dir's filesystem so we don't try to chown into bind mounts (where we'd
+    // either get EPERM under the user namespace or, worse, mutate host file ownership).
+    let user_id_n: u32 = user_id.parse().map_err(|err| {
+        io::Error::other(format!("USER_ID is not a valid u32: '{user_id}': {err}"))
+    })?;
+    let group_id_n: u32 = group_id.parse().map_err(|err| {
+        io::Error::other(format!("GROUP_ID is not a valid u32: '{group_id}': {err}"))
+    })?;
+    chown_tree_xdev(Path::new(&home_path), user_id_n, group_id_n)?;
+
     print_bold("The initialization has completed!");
     std::fs::File::create(DEVSHELL_INIT_STATE_FILE_NAME)?;
+
+    Ok(())
+}
+
+/// Recursively chowns `root` and everything beneath it to `uid:gid`, but stops at
+/// filesystem boundaries, in order to avoid changing mounted folders.
+fn chown_tree_xdev(root: &Path, uid: u32, gid: u32) -> io::Result<()> {
+    let root_dev = fs::symlink_metadata(root)?.dev();
+    chown_walker(root, root_dev, uid, gid)
+}
+
+fn chown_walker(path: &Path, root_dev: u64, uid: u32, gid: u32) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.dev() != root_dev {
+        // Different filesystem (bind mount, tmpfs, ...): skip entirely.
+        return Ok(());
+    }
+
+    chown(path, Some(uid), Some(gid))?;
+
+    if metadata.file_type().is_dir() {
+        for entry in fs::read_dir(path)? {
+            chown_walker(&entry?.path(), root_dev, uid, gid)?;
+        }
+    }
 
     Ok(())
 }
