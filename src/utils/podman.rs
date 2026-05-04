@@ -318,7 +318,7 @@ impl Podman {
 
         cmd.args([
             "--volume",
-            &format!("{self_path_str}:{DEVSHELL_MOUNT_PATH}:ro,z"),
+            &format!("{self_path_str}:{DEVSHELL_MOUNT_PATH}:ro"),
         ])
         .args(["--entrypoint", DEVSHELL_MOUNT_PATH]);
 
