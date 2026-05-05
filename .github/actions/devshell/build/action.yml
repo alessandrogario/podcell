@@ -1,0 +1,58 @@
+#
+# Copyright (c) 2025-present, Alessandro Gario
+# All rights reserved.
+#
+# This source code is licensed in accordance with the terms specified in
+# the LICENSE file found in the root directory of this source tree.
+#
+
+name: 'devshell build'
+description: 'Build the devshell binary'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install just
+      shell: bash
+      run: cargo install just
+
+    - name: Update Rust
+      shell: bash
+      run: rustup update
+
+    - name: Install the musl toolchain
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y musl-tools
+
+    - name: Install the musl target
+      shell: bash
+      run: |
+        rustup target add x86_64-unknown-linux-musl
+
+    - name: Build the project
+      shell: bash
+      run: just build
+
+    - name: Verify static linking
+      shell: bash
+      run: |
+        if ldd -d "target/x86_64-unknown-linux-musl/release/devshell" 2>&1 | grep -q "statically linked"; then
+          echo "Binary is statically linked."
+        else
+          echo "Error: Binary is not statically linked."
+          exit 1
+        fi
+
+    - name: Create the devshell binary archive
+      shell: bash
+      run: |
+        ( cd target/x86_64-unknown-linux-musl/release &&
+          zip devshell.zip devshell )
+
+    - name: Upload devshell artifact
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+      with:
+        name: devshell
+        path: target/x86_64-unknown-linux-musl/release/devshell.zip
