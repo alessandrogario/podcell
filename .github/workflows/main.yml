@@ -6,7 +6,7 @@
 # the LICENSE file found in the root directory of this source tree.
 #
 
-name: Linux
+name: CI
 
 on:
   pull_request:
@@ -15,68 +15,44 @@ on:
 
   push:
     branches:
-      - '**'
+      - main
+
+permissions: {}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
-env:
-  RUST_BACKTRACE: 1
-
 jobs:
-  format:
-    strategy:
-      matrix:
-        runner_image: [ubuntu-24.04]
-
-    uses: ./.github/workflows/format.yml
-    secrets: inherit
-
-    with:
-      runner_image: ${{ matrix.runner_image }}
-
-  clippy:
-    needs: [format]
-
-    strategy:
-      matrix:
-        runner_image: [ubuntu-24.04]
-        build_type: [Release, Debug]
-
-    uses: ./.github/workflows/clippy.yml
-    secrets: inherit
-
-    with:
-      runner_image: ${{ matrix.runner_image }}
-      build_type: ${{ matrix.build_type }}
-
   check:
-    needs: [format]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
 
-    strategy:
-      matrix:
-        runner_image: [ubuntu-24.04]
-        build_type: [Release, Debug]
+    permissions:
+      contents: read
 
-    uses: ./.github/workflows/check.yml
-    secrets: inherit
+    steps:
+      - name: Clone the source code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
 
-    with:
-      runner_image: ${{ matrix.runner_image }}
-      build_type: ${{ matrix.build_type }}
+      - name: Run checks
+        uses: ./.github/actions/devshell/check
 
-  linux:
-    needs: [clippy, check]
+  build:
+    needs: [check]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
 
-    strategy:
-      matrix:
-        runner_image: [ubuntu-24.04]
-        build_type: [Release, Debug]
+    permissions:
+      contents: read
 
-    uses: ./.github/workflows/posix_build.yml
-    secrets: inherit
+    steps:
+      - name: Clone the source code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
 
-    with:
-      runner_image: ${{ matrix.runner_image }}
-      build_type: ${{ matrix.build_type }}
+      - name: Build
+        uses: ./.github/actions/devshell/build
