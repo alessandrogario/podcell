@@ -15,6 +15,7 @@ use crate::commands::{
     init::{run as run_init, Arguments as InitArguments},
     list::{run as run_list, Arguments as ListArguments},
     rm::{run as run_rm, Arguments as RmArguments},
+    send::{run as run_send, Arguments as SendArguments},
     shell::{run as run_shell, Arguments as ShellArguments},
     start::{run as run_start, Arguments as StartArguments},
     stop::{run as run_stop, Arguments as StopArguments},
@@ -36,6 +37,7 @@ enum Command {
     Enter(EnterArguments),
     List(ListArguments),
     Rm(RmArguments),
+    Send(SendArguments),
     Start(StartArguments),
     Stop(StopArguments),
     #[clap(hide = true)]
@@ -51,6 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::List(args) => run_list(args),
         Command::Init(args) => run_init(args),
         Command::Rm(args) => run_rm(args),
+        Command::Send(args) => run_send(args),
         Command::Shell(args) => run_shell(args),
         Command::Start(args) => run_start(args),
         Command::Stop(args) => run_stop(args),

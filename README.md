@@ -11,6 +11,7 @@ A simple Podman-based development environment manager.
 - Create new containers for development, with arbitrary repeatable bind mounts
 - Start and stop containers as a discrete lifecycle step
 - Enter a running container from multiple terminals at once
+- Send files and directories into a running container via `/inbox`
 - List all available containers
 - Remove containers when no longer needed
 
@@ -28,6 +29,9 @@ devshell start mybox
 # Open a shell. Run from multiple terminals concurrently.
 devshell enter mybox
 
+# Send a file or directory into the container (must be running).
+devshell send mybox /path/to/file
+
 # Stop it (terminates all open shells).
 devshell stop mybox
 
@@ -37,6 +41,10 @@ devshell rm mybox
 
 The `--mount` flag takes `HOST:CONTAINER[:MODE]` where `MODE` is `ro` or `rw` (default `ro`).
 Both paths must be absolute.
+
+`devshell send` copies a file or directory into `/inbox` inside the container. The `/inbox`
+directory is created automatically on first use with sticky world-writable permissions (`1777`),
+and sent items are made world-readable and writable after copying.
 
 ### Mount path requirements
 
