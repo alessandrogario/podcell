@@ -425,6 +425,46 @@ impl Podman {
         Ok(())
     }
 
+    /// Execs a command inside a running container, waiting for it to finish.
+    pub fn exec(&self, container_id: &str, command: &[&str]) -> Result<(), PodmanError> {
+        let status = Command::new(PODMAN_EXECUTABLE_NAME)
+            .arg("exec")
+            .arg(container_id)
+            .args(command)
+            .status()?;
+
+        if !status.success() {
+            return Err(PodmanError::CommandError(status));
+        }
+
+        Ok(())
+    }
+
+    /// Copies `source` on the host into `dest` inside the container.
+    pub fn cp(
+        &self,
+        container_id: &str,
+        source: &std::path::Path,
+        dest: &str,
+    ) -> Result<(), PodmanError> {
+        let source_str = source.to_str().ok_or_else(|| {
+            io::Error::other(format!(
+                "Source path '{}' is not valid UTF-8",
+                source.display()
+            ))
+        })?;
+
+        let status = Command::new(PODMAN_EXECUTABLE_NAME)
+            .args(["cp", source_str, &format!("{container_id}:{dest}")])
+            .status()?;
+
+        if !status.success() {
+            return Err(PodmanError::CommandError(status));
+        }
+
+        Ok(())
+    }
+
     /// Execs a command inside a running container, replacing the current process.
     /// Always allocates a TTY and connects stdin so the user can interact with the command.
     pub fn exec_interactive(
