@@ -75,7 +75,7 @@ pub fn run(args: Arguments) -> Result<(), Box<dyn std::error::Error>> {
 fn prepare_host_path(host: &Path, user_uid: u32) -> Result<PathBuf, Box<dyn std::error::Error>> {
     if !host.exists() {
         return Err(format!(
-            "Mount host path '{}' does not exist. Create it before running `devshell create`.",
+            "Mount host path '{}' does not exist. Create it before running `podcell create`.",
             host.display()
         )
         .into());

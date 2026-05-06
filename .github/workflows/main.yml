@@ -55,7 +55,7 @@ jobs:
           persist-credentials: false
 
       - name: Run checks
-        uses: ./.github/actions/devshell/check
+        uses: ./.github/actions/podcell/check
 
   build:
     needs: [check]
@@ -72,4 +72,4 @@ jobs:
           persist-credentials: false
 
       - name: Build
-        uses: ./.github/actions/devshell/build
+        uses: ./.github/actions/podcell/build

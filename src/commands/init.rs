@@ -21,7 +21,7 @@ use std::{
 use clap::Args;
 
 /// Path of the file used to remember the container initialization state.
-const DEVSHELL_INIT_STATE_FILE_NAME: &str = "/.devshell";
+const PODCELL_INIT_STATE_FILE_NAME: &str = "/.podcell";
 
 /// Initialize the current environment.
 #[derive(Args)]
@@ -197,7 +197,7 @@ fn initialize() -> std::io::Result<()> {
     chown_tree_xdev(Path::new(&home_path), user_id_n, group_id_n)?;
 
     print_bold("The initialization has completed!");
-    std::fs::File::create(DEVSHELL_INIT_STATE_FILE_NAME)?;
+    std::fs::File::create(PODCELL_INIT_STATE_FILE_NAME)?;
 
     Ok(())
 }
@@ -230,11 +230,11 @@ fn chown_walker(path: &Path, root_dev: u64, uid: u32, gid: u32) -> io::Result<()
 /// Handler for the "init" command.
 ///
 /// On first run, performs container initialization and exits cleanly so the user can
-/// `devshell start` it later. On subsequent runs (state file present), execs `sleep infinity`
+/// `podcell start` it later. On subsequent runs (state file present), execs `sleep infinity`
 /// so the container has a long-lived PID 1 child that catatonit can SIGTERM cleanly when the
-/// user runs `devshell stop`.
+/// user runs `podcell stop`.
 pub fn run(_args: Arguments) -> Result<(), Box<dyn std::error::Error>> {
-    if !Path::new(DEVSHELL_INIT_STATE_FILE_NAME).exists() {
+    if !Path::new(PODCELL_INIT_STATE_FILE_NAME).exists() {
         initialize().map_err(Into::into)
     } else {
         Err(Command::new("sleep").arg("infinity").exec().into())

@@ -6,8 +6,8 @@
 # the LICENSE file found in the root directory of this source tree.
 #
 
-name: 'devshell build'
-description: 'Build the devshell binary'
+name: 'podcell build'
+description: 'Build the podcell binary'
 
 runs:
   using: 'composite'
@@ -38,21 +38,21 @@ runs:
     - name: Verify static linking
       shell: bash
       run: |
-        if ldd -d "target/x86_64-unknown-linux-musl/release/devshell" 2>&1 | grep -q "statically linked"; then
+        if ldd -d "target/x86_64-unknown-linux-musl/release/podcell" 2>&1 | grep -q "statically linked"; then
           echo "Binary is statically linked."
         else
           echo "Error: Binary is not statically linked."
           exit 1
         fi
 
-    - name: Create the devshell binary archive
+    - name: Create the podcell binary archive
       shell: bash
       run: |
         ( cd target/x86_64-unknown-linux-musl/release &&
-          zip devshell.zip devshell )
+          zip podcell.zip podcell )
 
-    - name: Upload devshell artifact
+    - name: Upload podcell artifact
       uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
       with:
-        name: devshell
-        path: target/x86_64-unknown-linux-musl/release/devshell.zip
+        name: podcell
+        path: target/x86_64-unknown-linux-musl/release/podcell.zip
