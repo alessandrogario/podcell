@@ -327,19 +327,8 @@ impl Podman {
             cmd.args(["--volume", &volume]);
         }
 
-        match (
-            std::path::Path::new("/sys/module/apparmor/parameters/enabled").exists(),
-            std::path::Path::new("/sys/fs/selinux/enforce").exists(),
-        ) {
-            (true, false) => {
-                cmd.args(["--security-opt", "apparmor=podcell-default"]);
-            }
-
-            (false, true) => {
-                cmd.args(["--security-opt", "label=type:container_runtime_t"]);
-            }
-
-            _ => {}
+        if std::path::Path::new("/sys/fs/selinux/enforce").exists() {
+            cmd.args(["--security-opt", "label=type:container_runtime_t"]);
         }
 
         let username = env::var("USER")
