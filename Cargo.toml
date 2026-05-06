@@ -9,7 +9,12 @@
 [package]
 name = "podcell"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+description = "A simple Podman-based development environment manager."
+license = "Apache-2.0"
+repository = "https://github.com/alessandrogario/podcell"
+keywords = ["podman", "container", "cli", "sandbox", "development"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 serde = "1.0.228"

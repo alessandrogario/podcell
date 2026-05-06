@@ -11,7 +11,7 @@ use crate::utils::{group::EtcGroup, package_manager::PackageManager, passwd::Etc
 use std::{
     fs, io,
     os::unix::{
-        fs::{chown, MetadataExt},
+        fs::{MetadataExt, chown},
         process::CommandExt,
     },
     path::Path,

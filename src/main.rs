@@ -10,15 +10,15 @@ mod commands;
 mod utils;
 
 use crate::commands::{
-    create::{run as run_create, Arguments as CreateArguments},
-    enter::{run as run_enter, Arguments as EnterArguments},
-    init::{run as run_init, Arguments as InitArguments},
-    list::{run as run_list, Arguments as ListArguments},
-    rm::{run as run_rm, Arguments as RmArguments},
-    send::{run as run_send, Arguments as SendArguments},
-    shell::{run as run_shell, Arguments as ShellArguments},
-    start::{run as run_start, Arguments as StartArguments},
-    stop::{run as run_stop, Arguments as StopArguments},
+    create::{Arguments as CreateArguments, run as run_create},
+    enter::{Arguments as EnterArguments, run as run_enter},
+    init::{Arguments as InitArguments, run as run_init},
+    list::{Arguments as ListArguments, run as run_list},
+    rm::{Arguments as RmArguments, run as run_rm},
+    send::{Arguments as SendArguments, run as run_send},
+    shell::{Arguments as ShellArguments, run as run_shell},
+    start::{Arguments as StartArguments, run as run_start},
+    stop::{Arguments as StopArguments, run as run_stop},
 };
 
 use clap::{Parser, Subcommand};
