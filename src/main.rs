@@ -24,7 +24,7 @@ use crate::commands::{
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "devshell")]
+#[command(name = "podcell")]
 #[command(about = "A simple podman-based development environment manager.", long_about = None)]
 struct Cli {
     #[command(subcommand)]

@@ -26,7 +26,7 @@ pub fn run(args: Arguments) -> Result<(), Box<dyn std::error::Error>> {
     if container.state != PodmanContainerState::Running {
         return Err(format!(
             "Container '{name}' is in state '{state}', not 'running'. \
-             Run `devshell start {name}` first.",
+             Run `podcell start {name}` first.",
             name = args.name,
             state = container.state,
         )
@@ -34,6 +34,6 @@ pub fn run(args: Arguments) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     podman
-        .exec_interactive(&container.id, &["/usr/bin/devshell", "shell"])
+        .exec_interactive(&container.id, &["/usr/bin/podcell", "shell"])
         .map_err(Into::into)
 }

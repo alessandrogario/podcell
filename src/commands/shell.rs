@@ -12,7 +12,7 @@ use clap::Args;
 
 /// Open an interactive login shell inside the container.
 ///
-/// Hidden subcommand: invoked by `devshell enter` via `podman exec`. Reads `USERNAME` from
+/// Hidden subcommand: invoked by `podcell enter` via `podman exec`. Reads `USERNAME` from
 /// the container's environment (set at create time) and execs `sudo -H -i -u $USERNAME`.
 #[derive(Args)]
 pub struct Arguments {}

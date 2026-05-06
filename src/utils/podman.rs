@@ -26,7 +26,7 @@ use thiserror::Error;
 const PODMAN_EXECUTABLE_NAME: &str = "podman";
 
 /// The path within the container where our own binary is mounted.
-const DEVSHELL_MOUNT_PATH: &str = "/usr/bin/devshell";
+const PODCELL_MOUNT_PATH: &str = "/usr/bin/podcell";
 
 /// Path to the /etc/passwd file.
 const ETC_PASSWD_PATH: &str = "/etc/passwd";
@@ -54,7 +54,7 @@ pub enum PodmanError {
         expected_type: String,
     },
 
-    #[error("the following container is either missing or is not managed by devshell: {0}")]
+    #[error("the following container is either missing or is not managed by podcell: {0}")]
     NotFound(String),
 
     #[error("podman exited with failure (exit_status: {0:?})")]
@@ -189,7 +189,7 @@ impl Podman {
             let label_map = Self::get_json_object_string_map(json_object, "Labels")?;
             if !label_map
                 .iter()
-                .any(|(key, value)| key == "manager" && value == "devshell")
+                .any(|(key, value)| key == "manager" && value == "podcell")
             {
                 continue;
             }
@@ -215,7 +215,7 @@ impl Podman {
     }
 
     /// Returns the user-declared bind-mount source paths for a container by querying
-    /// `podman inspect`. Filters out our own binary mount at `/usr/bin/devshell`
+    /// `podman inspect`. Filters out our own binary mount at `/usr/bin/podcell`
     pub fn list_user_bind_mount_sources(
         &self,
         container_id: &str,
@@ -259,7 +259,7 @@ impl Podman {
             }
 
             let destination = Self::get_json_object_string(mount, "Destination")?;
-            if destination == DEVSHELL_MOUNT_PATH {
+            if destination == PODCELL_MOUNT_PATH {
                 continue;
             }
 
@@ -289,7 +289,7 @@ impl Podman {
             .arg("--init")
             .arg("--tty")
             .arg("--interactive")
-            .args(["--label", "manager=devshell"])
+            .args(["--label", "manager=podcell"])
             .args(["--hosts-file", "image"])
             .arg(format!("--add-host={name}:127.0.0.1"))
             .arg(format!("--add-host={name}:::1"));
@@ -318,9 +318,9 @@ impl Podman {
 
         cmd.args([
             "--volume",
-            &format!("{self_path_str}:{DEVSHELL_MOUNT_PATH}:ro,z"),
+            &format!("{self_path_str}:{PODCELL_MOUNT_PATH}:ro,z"),
         ])
-        .args(["--entrypoint", DEVSHELL_MOUNT_PATH]);
+        .args(["--entrypoint", PODCELL_MOUNT_PATH]);
 
         for mount in mounts {
             let volume = mount.to_volume_arg()?;
@@ -332,7 +332,7 @@ impl Podman {
             std::path::Path::new("/sys/fs/selinux/enforce").exists(),
         ) {
             (true, false) => {
-                cmd.args(["--security-opt", "apparmor=devshell-default"]);
+                cmd.args(["--security-opt", "apparmor=podcell-default"]);
             }
 
             (false, true) => {
@@ -382,7 +382,7 @@ impl Podman {
         ))
     }
 
-    /// Looks up a devshell-managed container by name. Returns the full container record
+    /// Looks up a podcell-managed container by name. Returns the full container record
     /// (id + state + image info) so callers can make state decisions without re-querying.
     pub fn find_by_name(&self, container_name: &str) -> Result<PodmanContainer, PodmanError> {
         self.list()?

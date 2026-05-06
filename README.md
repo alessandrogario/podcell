@@ -1,8 +1,8 @@
-# devshell
+# podcell
 
 A simple Podman-based development environment manager.
 
-**devshell** is a personal utility I've primarily written for myself to quickly create, manage, and enter isolated development containers using Podman. It aims to provide a minimal and straightforward command-line interface for managing development environments.
+**podcell** is a personal utility I've primarily written for myself to quickly create, manage, and enter isolated development containers using Podman. It aims to provide a minimal and straightforward command-line interface for managing development environments.
 
 **This tool is intentionally simple and designed for personal workflows on the atomic Linux distribution I'm using.**
 
@@ -19,36 +19,36 @@ A simple Podman-based development environment manager.
 
 ```sh
 # Create the container (runs initialization, then exits to state Exited).
-devshell create fedora:42 mybox \
+podcell create fedora:42 mybox \
     --mount $PWD:/mnt/work:rw \
     --mount /tmp/cache:/mnt/cache:ro
 
 # Start it.
-devshell start mybox
+podcell start mybox
 
 # Open a shell. Run from multiple terminals concurrently.
-devshell enter mybox
+podcell enter mybox
 
 # Send a file or directory into the container (must be running).
-devshell send mybox /path/to/file
+podcell send mybox /path/to/file
 
 # Stop it (terminates all open shells).
-devshell stop mybox
+podcell stop mybox
 
 # Remove it (must be stopped first).
-devshell rm mybox
+podcell rm mybox
 ```
 
 The `--mount` flag takes `HOST:CONTAINER[:MODE]` where `MODE` is `ro` or `rw` (default `ro`).
 Both paths must be absolute.
 
-`devshell send` copies a file or directory into `/inbox` inside the container. The `/inbox`
+`podcell send` copies a file or directory into `/inbox` inside the container. The `/inbox`
 directory is created automatically on first use with sticky world-writable permissions (`1777`),
 and sent items are made world-readable and writable after copying.
 
 ### Mount path requirements
 
-- **The host path must be owned by the user running `devshell`.** Mounts owned by root or
+- **The host path must be owned by the user running `podcell`.** Mounts owned by root or
   another user are rejected at create and start time. This is required for the rootless
   userns mapping to work correctly and to keep SELinux relabel side effects confined to
   user-owned data.
@@ -87,11 +87,11 @@ sudo dnf install musl-devel
 
 Verify the binary is statically linked:
 ```sh
-ldd -d target/x86_64-unknown-linux-musl/release/devshell
+ldd -d target/x86_64-unknown-linux-musl/release/podcell
 ```
 
 The output should show "not a dynamic executable" or similar, confirming static linking.
 
 ### Why Static Linking?
 
-The `devshell` binary must be statically linked because it executes itself inside containers where dynamic dependencies may not be available. Static linking ensures the binary runs in any Linux environment without external dependencies.
+The `podcell` binary must be statically linked because it executes itself inside containers where dynamic dependencies may not be available. Static linking ensures the binary runs in any Linux environment without external dependencies.

@@ -20,7 +20,7 @@ pub fn run(_args: Arguments) -> Result<(), Box<dyn std::error::Error>> {
 
     let container_list = podman.list()?;
     if container_list.is_empty() {
-        println!("No devshell-managed containers found.");
+        println!("No podcell-managed containers found.");
         return Ok(());
     }
 

@@ -25,7 +25,7 @@ pub fn run(args: Arguments) -> Result<(), Box<dyn std::error::Error>> {
 
     if container.state == PodmanContainerState::Running {
         return Err(format!(
-            "Container '{name}' is in state '{state}'. Run `devshell stop {name}` first.",
+            "Container '{name}' is in state '{state}'. Run `podcell stop {name}` first.",
             name = args.name,
             state = container.state,
         )
