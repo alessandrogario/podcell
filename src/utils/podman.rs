@@ -304,7 +304,6 @@ impl Podman {
             .args(["--hostname", name])
             .arg("--userns=keep-id")
             .arg("--user=0:0")
-            .args(["--security-opt", "no-new-privileges"])
             .args(["--security-opt", "mask=/proc/acpi,/proc/kcore,/proc/keys,/proc/sched_debug,/proc/timer_list,/proc/timer_stats,/sys/firmware"])
             .arg("--cap-drop=AUDIT_CONTROL,AUDIT_READ,AUDIT_WRITE,BPF,BLOCK_SUSPEND,CHECKPOINT_RESTORE,IPC_LOCK,IPC_OWNER,KILL,LEASE,LINUX_IMMUTABLE,MAC_ADMIN,MAC_OVERRIDE,MKNOD,NET_ADMIN,NET_BROADCAST,PERFMON,SETFCAP,SETPCAP,SYSLOG,SYS_ADMIN,SYS_BOOT,SYS_MODULE,SYS_NICE,SYS_PACCT,SYS_PTRACE,SYS_RAWIO,SYS_RESOURCE,SYS_TIME,SYS_TTY_CONFIG,WAKE_ALARM")
             .arg("--cap-add=DAC_OVERRIDE,DAC_READ_SEARCH");
