@@ -32,11 +32,13 @@ pub struct Arguments {
     host_network: bool,
 
     /// Bind mount in the form HOST:CONTAINER[:MODE]. MODE is `ro` or `rw` (default `ro`).
-    /// Pass --mount multiple times to add multiple mounts.
+    /// HOST may be relative, and is resolved against the current directory; CONTAINER must
+    /// be absolute. The host path must already exist. Pass --mount multiple times to add
+    /// multiple mounts.
     #[arg(
         long = "mount",
         value_name = "HOST:CONTAINER[:MODE]",
-        help = "Bind mount a host path into the container (repeatable)"
+        help = "Bind mount a host path into the container (repeatable, relative paths allowed)"
     )]
     mounts: Vec<Mount>,
 }

@@ -60,6 +60,9 @@ pub enum MountRenderError {
 }
 
 /// A user-supplied bind mount, parsed from a `--mount` argument.
+///
+/// The container path is absolute; the host path may be relative, and is canonicalized by
+/// `commands::create::prepare_host_path` before reaching podman.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mount {
     pub host: PathBuf,
@@ -131,13 +134,6 @@ impl FromStr for Mount {
         let host = PathBuf::from(host_str);
         let container = PathBuf::from(container_str);
 
-        if !host.is_absolute() {
-            return Err(MountParseError::RelativePath {
-                input: s.to_owned(),
-                field: "host",
-                path: host_str.to_owned(),
-            });
-        }
         if !container.is_absolute() {
             return Err(MountParseError::RelativePath {
                 input: s.to_owned(),
@@ -296,22 +292,36 @@ mod tests {
     }
 
     #[test]
-    fn rejects_relative_host() {
+    fn accepts_relative_host() {
+        let m = parse("foo:/bar").unwrap();
+        assert_eq!(m.host, PathBuf::from("foo"));
+        assert_eq!(m.container, PathBuf::from("/bar"));
+        assert_eq!(m.mode, MountMode::Ro);
+    }
+
+    #[test]
+    fn accepts_dotted_relative_host() {
+        assert_eq!(parse("./foo:/bar").unwrap().host, PathBuf::from("./foo"));
         assert_eq!(
-            parse("foo:/bar"),
-            Err(MountParseError::RelativePath {
-                input: "foo:/bar".to_owned(),
-                field: "host",
-                path: "foo".to_owned(),
-            })
+            parse("../foo/bar:/bar:rw").unwrap().host,
+            PathBuf::from("../foo/bar")
         );
     }
 
     #[test]
-    fn rejects_dotted_relative_host() {
+    fn accepts_relative_host_rendering_verbatim() {
+        let m = parse("foo:/bar:ro").unwrap();
+        assert_eq!(m.to_volume_arg().unwrap(), "foo:/bar:ro,z");
+    }
+
+    #[test]
+    fn rejects_relative_container_when_host_is_relative() {
         assert!(matches!(
-            parse("./foo:/bar"),
-            Err(MountParseError::RelativePath { field: "host", .. })
+            parse("foo:bar"),
+            Err(MountParseError::RelativePath {
+                field: "container",
+                ..
+            })
         ));
     }
 
@@ -325,15 +335,6 @@ mod tests {
                 path: "bar".to_owned(),
             })
         );
-    }
-
-    #[test]
-    fn rejects_both_relative() {
-        // Host is checked first.
-        assert!(matches!(
-            parse("foo:bar"),
-            Err(MountParseError::RelativePath { field: "host", .. })
-        ));
     }
 
     #[test]

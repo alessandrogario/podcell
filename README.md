@@ -20,7 +20,7 @@ A simple Podman-based development environment manager.
 ```sh
 # Create the container (runs initialization, then exits to state Exited).
 podcell create fedora:42 mybox \
-    --mount $PWD:/mnt/work:rw \
+    --mount .:/mnt/work:rw \
     --mount /tmp/cache:/mnt/cache:ro
 
 # Start it.
@@ -40,7 +40,11 @@ podcell rm mybox
 ```
 
 The `--mount` flag takes `HOST:CONTAINER[:MODE]` where `MODE` is `ro` or `rw` (default `ro`).
-Both paths must be absolute.
+The `CONTAINER` path must be absolute.
+
+The `HOST` path may be relative: it is resolved against the current directory of the
+`podcell create` invocation and recorded in the container configuration as an absolute path, so
+`podcell start` works from any directory.
 
 `podcell send` copies a file or directory into `/inbox` inside the container. The `/inbox`
 directory is created automatically on first use with sticky world-writable permissions (`1777`),
@@ -57,6 +61,9 @@ and sent items are made world-readable and writable after copying.
   container label. This is fine for project directories, scratch space, etc.; it will
   break consumers of paths with load-bearing labels such as `~/.ssh`, `~/.config/dconf`,
   `~/.local/share/keyrings`, and similar. Don't pass those as `--mount`.
+- **Relative host paths are frozen at create time.** A relative `HOST` is canonicalized during
+  `podcell create`, so moving the container does not retarget the mount: if you want a different
+  source path, remove and recreate the container.
 
 ## Build Instructions
 
