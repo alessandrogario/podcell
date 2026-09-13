@@ -27,10 +27,6 @@ pub struct Arguments {
     #[arg()]
     name: String,
 
-    /// If enabled, the container is created with --network=host.
-    #[arg(long, default_value_t = false, help = "Use the host network namespace")]
-    host_network: bool,
-
     /// Bind mount in the form HOST:CONTAINER[:MODE]. MODE is `ro` or `rw` (default `ro`).
     /// HOST may be relative, and is resolved against the current directory; CONTAINER must
     /// be absolute. The host path must already exist. Pass --mount multiple times to add
@@ -59,12 +55,7 @@ pub fn run(args: Arguments) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Podman::new()
-        .create(
-            args.host_network,
-            &prepared_mounts,
-            &args.distribution,
-            &args.name,
-        )
+        .create(&prepared_mounts, &args.distribution, &args.name)
         .map_err(Into::into)
 }
 

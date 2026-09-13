@@ -278,7 +278,6 @@ impl Podman {
     /// (see `list_user_bind_mount_sources`), so no additional bookkeeping is needed here.
     pub fn create(
         &self,
-        use_host_network: bool,
         mounts: &[Mount],
         distribution: &str,
         name: &str,
@@ -294,11 +293,7 @@ impl Podman {
             .arg(format!("--add-host={name}:127.0.0.1"))
             .arg(format!("--add-host={name}:::1"));
 
-        if use_host_network {
-            cmd.arg("--network=host");
-        } else {
-            cmd.arg("--network=pasta");
-        }
+        cmd.arg("--network=pasta");
 
         cmd.args(["--name", name])
             .args(["--hostname", name])
