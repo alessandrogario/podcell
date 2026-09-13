@@ -50,15 +50,17 @@ enum Command {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     match Cli::parse().command {
-        Command::Create(args) => run_create(args),
-        Command::Edit(args) => run_edit(args),
-        Command::Enter(args) => run_enter(args),
-        Command::List(args) => run_list(args),
-        Command::Init(args) => run_init(args),
-        Command::Rm(args) => run_rm(args),
-        Command::Send(args) => run_send(args),
-        Command::Shell(args) => run_shell(args),
-        Command::Start(args) => run_start(args),
-        Command::Stop(args) => run_stop(args),
+        Command::Create(args) => run_create(args)?,
+        Command::Edit(args) => run_edit(args)?,
+        Command::Enter(args) => run_enter(args)?,
+        Command::List(args) => run_list(args)?,
+        Command::Init(args) => run_init(args)?,
+        Command::Rm(args) => run_rm(args)?,
+        Command::Send(args) => run_send(args)?,
+        Command::Shell(args) => run_shell(args)?,
+        Command::Start(args) => run_start(args)?,
+        Command::Stop(args) => run_stop(args)?,
     }
+
+    Ok(())
 }

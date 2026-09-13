@@ -6,7 +6,7 @@
 // the LICENSE file found in the root directory of this source tree.
 //
 
-use crate::utils::podman::Podman;
+use crate::utils::podman::{Podman, PodmanError};
 
 use clap::Args;
 
@@ -15,7 +15,7 @@ use clap::Args;
 pub struct Arguments {}
 
 /// Handler for the "list" command.
-pub fn run(_args: Arguments) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(_args: Arguments) -> Result<(), PodmanError> {
     let podman = Podman::new();
 
     let container_list = podman.list()?;

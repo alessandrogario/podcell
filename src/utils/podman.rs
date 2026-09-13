@@ -13,6 +13,8 @@ use crate::utils::{
     port::{Port, PortParseError},
 };
 
+use thiserror::Error;
+
 use std::{
     env, io,
     os::unix::process::CommandExt,
@@ -20,8 +22,6 @@ use std::{
     process::{Command, ExitStatus},
     string::FromUtf8Error,
 };
-
-use thiserror::Error;
 
 /// The name of the Podman executable.
 const PODMAN_EXECUTABLE_NAME: &str = "podman";
@@ -39,8 +39,16 @@ const ETC_GROUP_PATH: &str = "/etc/group";
 #[derive(Error, Debug)]
 pub enum PodmanError {
     /// Podman could not be executed.
-    #[error("failed to execute podman")]
-    IOError(#[from] io::Error),
+    #[error("failed to execute podman while attempting to {operation}: {source}")]
+    Execute {
+        operation: &'static str,
+        #[source]
+        source: io::Error,
+    },
+
+    /// The current podcell executable could not be located.
+    #[error("failed to locate the current podcell executable: {0}")]
+    CurrentExecutable(#[source] io::Error),
 
     /// Podman output was not valid UTF-8.
     #[error("podman has returned invalid UTF-8 output")]
@@ -55,7 +63,9 @@ pub enum PodmanError {
     MissingJSONKey(String),
 
     /// A Podman JSON field had an unexpected type.
-    #[error("podman exited with failure (key: {key_name:?}, expected_type: {expected_type:?})")]
+    #[error(
+        "podman returned an invalid JSON field (key: {key_name:?}, expected type: {expected_type:?})"
+    )]
     InvalidJSONKeyType {
         /// The field containing the invalid value.
         key_name: String,
@@ -63,13 +73,43 @@ pub enum PodmanError {
         expected_type: String,
     },
 
+    /// Podman returned an unknown container state.
+    #[error(transparent)]
+    InvalidContainerState(#[from] PodmanContainerStateParseError),
+
     /// The requested podcell-managed container was not found.
     #[error("the following container is either missing or is not managed by podcell: {0}")]
     NotFound(String),
 
     /// A Podman command returned a failure status.
-    #[error("podman exited with failure (exit_status: {0:?})")]
-    CommandError(ExitStatus),
+    #[error("podman failed to {operation} (exit_status: {exit_status:?})")]
+    CommandError {
+        operation: &'static str,
+        exit_status: ExitStatus,
+    },
+
+    /// A path passed to Podman was not valid UTF-8.
+    #[error("{description} path '{path}' is not valid UTF-8")]
+    NonUtf8Path {
+        description: &'static str,
+        path: String,
+    },
+
+    /// A required environment variable could not be read.
+    #[error("failed to access the {name} environment variable: {source}")]
+    EnvironmentVariable {
+        name: &'static str,
+        #[source]
+        source: env::VarError,
+    },
+
+    /// The current user was absent from the passwd database.
+    #[error("failed to locate username '{username}' in {ETC_PASSWD_PATH}")]
+    UserNotFound { username: String },
+
+    /// The current user's primary group was absent from the group database.
+    #[error("failed to locate primary group id {group_id} in {ETC_GROUP_PATH}")]
+    PrimaryGroupNotFound { group_id: u32 },
 
     /// Podman's group file could not be read or parsed.
     #[error("group file error")]
@@ -139,7 +179,7 @@ impl std::fmt::Display for PodmanContainerState {
 }
 
 impl std::str::FromStr for PodmanContainerState {
-    type Err = ();
+    type Err = PodmanContainerStateParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
@@ -151,9 +191,18 @@ impl std::str::FromStr for PodmanContainerState {
             "stopping" => Ok(PodmanContainerState::Stopping),
             "restarting" => Ok(PodmanContainerState::Restarting),
             "dead" => Ok(PodmanContainerState::Dead),
-            _ => Err(()),
+            _ => Err(PodmanContainerStateParseError {
+                state: s.to_owned(),
+            }),
         }
     }
+}
+
+/// Error returned when Podman reports an unknown container state.
+#[derive(Debug, Error, PartialEq, Eq)]
+#[error("invalid container state '{state}'")]
+pub struct PodmanContainerStateParseError {
+    pub state: String,
 }
 
 /// Represents a container.
@@ -202,10 +251,17 @@ impl Podman {
         let podman_output = Command::new(PODMAN_EXECUTABLE_NAME)
             .args(["ps", "--all", "--format=json"])
             .stderr(std::process::Stdio::inherit())
-            .output()?;
+            .output()
+            .map_err(|source| PodmanError::Execute {
+                operation: "list containers",
+                source,
+            })?;
 
         if !podman_output.status.success() {
-            return Err(PodmanError::CommandError(podman_output.status));
+            return Err(PodmanError::CommandError {
+                operation: "list containers",
+                exit_status: podman_output.status,
+            });
         }
 
         let json_output: serde_json::Value =
@@ -213,9 +269,13 @@ impl Podman {
 
         let mut container_list = Vec::new();
 
-        for json_object in json_output
-            .as_array()
-            .ok_or(io::Error::other("The JSON output is not an array."))?
+        for json_object in
+            json_output
+                .as_array()
+                .ok_or_else(|| PodmanError::InvalidJSONKeyType {
+                    key_name: "(root)".to_owned(),
+                    expected_type: "array".to_owned(),
+                })?
         {
             let label_map = Self::get_json_object_string_map(json_object, "Labels")?;
             if !label_map
@@ -236,9 +296,7 @@ impl Podman {
                 image,
                 image_id,
                 name_list,
-                state: string_state
-                    .parse()
-                    .map_err(|_| io::Error::other("Invalid container state"))?,
+                state: string_state.parse()?,
             });
         }
 
@@ -268,12 +326,10 @@ impl Podman {
             .arg("--cap-drop=AUDIT_CONTROL,AUDIT_READ,AUDIT_WRITE,BPF,BLOCK_SUSPEND,CHECKPOINT_RESTORE,IPC_LOCK,IPC_OWNER,KILL,LEASE,LINUX_IMMUTABLE,MAC_ADMIN,MAC_OVERRIDE,MKNOD,NET_ADMIN,NET_BROADCAST,PERFMON,SETFCAP,SETPCAP,SYSLOG,SYS_ADMIN,SYS_BOOT,SYS_MODULE,SYS_NICE,SYS_PACCT,SYS_PTRACE,SYS_RAWIO,SYS_RESOURCE,SYS_TIME,SYS_TTY_CONFIG,WAKE_ALARM")
             .arg("--cap-add=DAC_OVERRIDE,DAC_READ_SEARCH");
 
-        let self_path = env::current_exe()?;
-        let self_path_str = self_path.to_str().ok_or_else(|| {
-            io::Error::other(format!(
-                "Failed to convert the binary path '{}' to string",
-                self_path.display()
-            ))
+        let self_path = env::current_exe().map_err(PodmanError::CurrentExecutable)?;
+        let self_path_str = self_path.to_str().ok_or_else(|| PodmanError::NonUtf8Path {
+            description: "podcell executable",
+            path: self_path.display().to_string(),
         })?;
 
         cmd.args([
@@ -296,28 +352,25 @@ impl Podman {
             cmd.args(["--security-opt", "label=type:container_runtime_t"]);
         }
 
-        let username = env::var("USER")
-            .map_err(|_| io::Error::other("Failed to get USER environment variable"))?;
+        let username = env::var("USER").map_err(|source| PodmanError::EnvironmentVariable {
+            name: "USER",
+            source,
+        })?;
 
         let etc_passwd = EtcPasswd::new(ETC_PASSWD_PATH)?;
         let user_info = etc_passwd
             .iter()
             .find(|user| user.name == username)
-            .ok_or_else(|| {
-                io::Error::other(format!(
-                    "Failed to locate username {username} in {ETC_PASSWD_PATH}"
-                ))
+            .ok_or_else(|| PodmanError::UserNotFound {
+                username: username.clone(),
             })?;
 
         let etc_group = EtcGroup::new(ETC_GROUP_PATH)?;
         let primary_group_name = etc_group
             .iter()
             .find(|group| group.id == user_info.group_id)
-            .ok_or_else(|| {
-                io::Error::other(format!(
-                    "Failed to locate primary group id {} in {}",
-                    user_info.group_id, ETC_GROUP_PATH
-                ))
+            .ok_or(PodmanError::PrimaryGroupNotFound {
+                group_id: user_info.group_id,
             })?;
 
         cmd.args([
@@ -333,9 +386,15 @@ impl Podman {
 
         cmd.arg(&config.image_ref).arg("init");
 
-        let status = cmd.status()?;
+        let status = cmd.status().map_err(|source| PodmanError::Execute {
+            operation: "create container",
+            source,
+        })?;
         if !status.success() {
-            return Err(PodmanError::CommandError(status));
+            return Err(PodmanError::CommandError {
+                operation: "create container",
+                exit_status: status,
+            });
         }
 
         Ok(())
@@ -358,10 +417,17 @@ impl Podman {
         let status = Command::new(PODMAN_EXECUTABLE_NAME)
             .arg("start")
             .arg(container_id)
-            .status()?;
+            .status()
+            .map_err(|source| PodmanError::Execute {
+                operation: "start container",
+                source,
+            })?;
 
         if !status.success() {
-            return Err(PodmanError::CommandError(status));
+            return Err(PodmanError::CommandError {
+                operation: "start container",
+                exit_status: status,
+            });
         }
 
         Ok(())
@@ -375,10 +441,17 @@ impl Podman {
         let status = Command::new(PODMAN_EXECUTABLE_NAME)
             .arg("stop")
             .arg(container_id)
-            .status()?;
+            .status()
+            .map_err(|source| PodmanError::Execute {
+                operation: "stop container",
+                source,
+            })?;
 
         if !status.success() {
-            return Err(PodmanError::CommandError(status));
+            return Err(PodmanError::CommandError {
+                operation: "stop container",
+                exit_status: status,
+            });
         }
 
         Ok(())
@@ -390,10 +463,17 @@ impl Podman {
             .arg("exec")
             .arg(container_id)
             .args(command)
-            .status()?;
+            .status()
+            .map_err(|source| PodmanError::Execute {
+                operation: "execute container command",
+                source,
+            })?;
 
         if !status.success() {
-            return Err(PodmanError::CommandError(status));
+            return Err(PodmanError::CommandError {
+                operation: "execute container command",
+                exit_status: status,
+            });
         }
 
         Ok(())
@@ -406,19 +486,24 @@ impl Podman {
         source: &std::path::Path,
         dest: &str,
     ) -> Result<(), PodmanError> {
-        let source_str = source.to_str().ok_or_else(|| {
-            io::Error::other(format!(
-                "Source path '{}' is not valid UTF-8",
-                source.display()
-            ))
+        let source_str = source.to_str().ok_or_else(|| PodmanError::NonUtf8Path {
+            description: "source",
+            path: source.display().to_string(),
         })?;
 
         let status = Command::new(PODMAN_EXECUTABLE_NAME)
             .args(["cp", source_str, &format!("{container_id}:{dest}")])
-            .status()?;
+            .status()
+            .map_err(|source| PodmanError::Execute {
+                operation: "copy into container",
+                source,
+            })?;
 
         if !status.success() {
-            return Err(PodmanError::CommandError(status));
+            return Err(PodmanError::CommandError {
+                operation: "copy into container",
+                exit_status: status,
+            });
         }
 
         Ok(())
@@ -439,7 +524,10 @@ impl Podman {
             .args(command)
             .exec();
 
-        Err(PodmanError::IOError(err))
+        Err(PodmanError::Execute {
+            operation: "execute interactive container command",
+            source: err,
+        })
     }
 
     /// Deletes a container by id. Replaces the current process with `podman rm`.
@@ -447,10 +535,17 @@ impl Podman {
         let status = Command::new(PODMAN_EXECUTABLE_NAME)
             .arg("rm")
             .arg(container_id)
-            .status()?;
+            .status()
+            .map_err(|source| PodmanError::Execute {
+                operation: "remove container",
+                source,
+            })?;
 
         if !status.success() {
-            return Err(PodmanError::CommandError(status));
+            return Err(PodmanError::CommandError {
+                operation: "remove container",
+                exit_status: status,
+            });
         }
 
         Ok(())
@@ -460,10 +555,17 @@ impl Podman {
     pub fn commit(&self, container_id: &str, image_ref: &str) -> Result<(), PodmanError> {
         let status = Command::new(PODMAN_EXECUTABLE_NAME)
             .args(["commit", container_id, image_ref])
-            .status()?;
+            .status()
+            .map_err(|source| PodmanError::Execute {
+                operation: "commit container",
+                source,
+            })?;
 
         if !status.success() {
-            return Err(PodmanError::CommandError(status));
+            return Err(PodmanError::CommandError {
+                operation: "commit container",
+                exit_status: status,
+            });
         }
 
         Ok(())
@@ -476,10 +578,17 @@ impl Podman {
             .arg("--tag")
             .arg(image_ref)
             .arg(context_dir)
-            .status()?;
+            .status()
+            .map_err(|source| PodmanError::Execute {
+                operation: "build image",
+                source,
+            })?;
 
         if !status.success() {
-            return Err(PodmanError::CommandError(status));
+            return Err(PodmanError::CommandError {
+                operation: "build image",
+                exit_status: status,
+            });
         }
 
         Ok(())
@@ -490,10 +599,17 @@ impl Podman {
         let status = Command::new(PODMAN_EXECUTABLE_NAME)
             .arg("rmi")
             .arg(image_ref)
-            .status()?;
+            .status()
+            .map_err(|source| PodmanError::Execute {
+                operation: "remove image",
+                source,
+            })?;
 
         if !status.success() {
-            return Err(PodmanError::CommandError(status));
+            return Err(PodmanError::CommandError {
+                operation: "remove image",
+                exit_status: status,
+            });
         }
 
         Ok(())
@@ -578,10 +694,17 @@ impl Podman {
         let output = Command::new(PODMAN_EXECUTABLE_NAME)
             .args(["inspect", "--type=container", container_id])
             .stderr(std::process::Stdio::inherit())
-            .output()?;
+            .output()
+            .map_err(|source| PodmanError::Execute {
+                operation: "inspect container",
+                source,
+            })?;
 
         if !output.status.success() {
-            return Err(PodmanError::CommandError(output.status));
+            return Err(PodmanError::CommandError {
+                operation: "inspect container",
+                exit_status: output.status,
+            });
         }
 
         let json: serde_json::Value = serde_json::from_str(&String::from_utf8(output.stdout)?)?;
@@ -699,6 +822,18 @@ mod tests {
     use crate::utils::port::PortProtocol;
 
     #[test]
+    fn unknown_container_state_returns_the_original_value() {
+        let error = "migrating".parse::<PodmanContainerState>().unwrap_err();
+
+        assert_eq!(
+            error,
+            PodmanContainerStateParseError {
+                state: "migrating".to_owned(),
+            }
+        );
+    }
+
+    #[test]
     fn get_container_ports_preserves_multiple_host_ports_for_one_container_port() {
         let container = serde_json::json!({
             "HostConfig": {
@@ -724,5 +859,25 @@ mod tests {
             container: 80,
             protocol: PortProtocol::Tcp,
         }));
+    }
+
+    #[test]
+    fn get_container_ports_preserves_the_parse_error_variant() {
+        let container = serde_json::json!({
+            "HostConfig": {
+                "PortBindings": {
+                    "invalid/tcp": [{ "HostPort": "8080" }]
+                }
+            }
+        });
+
+        assert!(matches!(
+            Podman::get_container_ports(&container),
+            Err(PodmanError::PortParseError(PortParseError::InvalidPort {
+                field: "container",
+                value,
+                ..
+            })) if value == "invalid"
+        ));
     }
 }

@@ -8,40 +8,64 @@
 
 //! Host-side user and path helpers.
 
-use std::{io, os::unix::fs::MetadataExt, path::Path};
+use crate::utils::passwd::{EtcPasswd, EtcPasswdError};
 
-use crate::utils::passwd::EtcPasswd;
+use thiserror::Error;
+
+use std::{io, os::unix::fs::MetadataExt, path::Path};
 
 /// System passwd file used for user lookup.
 const ETC_PASSWD_PATH: &str = "/etc/passwd";
 
-/// Looks up the current user's UID by reading `$USER` and resolving it via `/etc/passwd`.
-pub fn current_user_uid() -> io::Result<u32> {
-    let username = std::env::var("USER")
-        .map_err(|err| io::Error::other(format!("USER environment variable not set: {err}")))?;
+/// Errors produced while looking up host users and filesystem ownership.
+#[derive(Debug, Error)]
+pub enum SystemError {
+    /// A required environment variable could not be read.
+    #[error("failed to access the {name} environment variable: {source}")]
+    EnvironmentVariable {
+        name: &'static str,
+        #[source]
+        source: std::env::VarError,
+    },
 
-    let etc_passwd =
-        EtcPasswd::new(ETC_PASSWD_PATH).map_err(|err| io::Error::other(format!("{err}")))?;
+    /// The host passwd database could not be read or parsed.
+    #[error("failed to read the host passwd database: {0}")]
+    Passwd(#[from] EtcPasswdError),
+
+    /// The requested user does not exist in the host passwd database.
+    #[error("user '{username}' not found in {ETC_PASSWD_PATH}")]
+    UserNotFound { username: String },
+
+    /// Metadata for a host path could not be read.
+    #[error("mount host path '{path}' is not accessible: {source}")]
+    PathMetadata {
+        path: String,
+        #[source]
+        source: io::Error,
+    },
+}
+
+/// Looks up the current user's UID by reading `$USER` and resolving it via `/etc/passwd`.
+pub fn current_user_uid() -> Result<u32, SystemError> {
+    let username = std::env::var("USER").map_err(|source| SystemError::EnvironmentVariable {
+        name: "USER",
+        source,
+    })?;
+
+    let etc_passwd = EtcPasswd::new(ETC_PASSWD_PATH)?;
 
     etc_passwd
         .iter()
         .find(|user| user.name == username)
         .map(|user| user.id)
-        .ok_or_else(|| {
-            io::Error::other(format!("User '{username}' not found in {ETC_PASSWD_PATH}"))
-        })
+        .ok_or(SystemError::UserNotFound { username })
 }
 
 /// Checks whether a path is owned by the expected user ID.
-pub fn is_path_owned_by_user(path: &Path, expected_uid: u32) -> io::Result<bool> {
-    let metadata = std::fs::metadata(path).map_err(|err| {
-        io::Error::new(
-            err.kind(),
-            format!(
-                "Mount host path '{}' is not accessible: {err}",
-                path.display()
-            ),
-        )
+pub fn is_path_owned_by_user(path: &Path, expected_uid: u32) -> Result<bool, SystemError> {
+    let metadata = std::fs::metadata(path).map_err(|source| SystemError::PathMetadata {
+        path: path.display().to_string(),
+        source,
     })?;
 
     let owner_uid = metadata.uid();
