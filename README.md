@@ -46,9 +46,9 @@ The `HOST` path may be relative: it is resolved against the current directory of
 `podcell create` invocation and recorded in the container configuration as an absolute path, so
 `podcell start` works from any directory.
 
-`podcell send` copies a file or directory into `/inbox` inside the container. The `/inbox`
-directory is created automatically on first use with sticky world-writable permissions (`1777`),
-and sent items are made world-readable and writable after copying.
+`podcell send` copies a file or directory into `/inbox` inside the container. The folder is created
+on first use with mode `0777` and its contents belong to the container's primary user, so items can
+be read, edited, moved and deleted from inside.
 
 ### Mount path requirements
 
