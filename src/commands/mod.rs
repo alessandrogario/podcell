@@ -7,6 +7,7 @@
 //
 
 pub mod create;
+pub mod edit;
 pub mod enter;
 pub mod init;
 pub mod list;

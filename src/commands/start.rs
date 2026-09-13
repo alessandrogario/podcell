@@ -6,10 +6,7 @@
 // the LICENSE file found in the root directory of this source tree.
 //
 
-use crate::utils::{
-    host::{current_user_uid, validate_host_path},
-    podman::{Podman, PodmanContainerState},
-};
+use crate::utils::podman::{Podman, PodmanContainerState};
 
 use clap::Args;
 
@@ -29,18 +26,6 @@ pub fn run(args: Arguments) -> Result<(), Box<dyn std::error::Error>> {
     if container.state == PodmanContainerState::Running {
         println!("Container '{}' is already running.", args.name);
         return Ok(());
-    }
-
-    let user_uid = current_user_uid()?;
-    let mount_sources = podman.list_user_bind_mount_sources(&container.id)?;
-    for source in &mount_sources {
-        validate_host_path(source, user_uid).map_err(|err| {
-            format!(
-                "Refusing to start '{}': mount source '{}' failed validation: {err}",
-                args.name,
-                source.display()
-            )
-        })?;
     }
 
     podman.start(&container.id).map_err(Into::into)
