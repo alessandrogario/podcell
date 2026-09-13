@@ -7,21 +7,20 @@
 //
 
 use crate::utils::{
-    host::{current_user_uid, validate_host_path},
-    mount::Mount,
-    podman::Podman,
+    mount::{Mount, parse_validated_user_mount},
+    podman::{Config, Podman},
+    port::Port,
 };
-
-use std::path::{Path, PathBuf};
 
 use clap::Args;
 
 /// Create a new container.
 #[derive(Args)]
 pub struct Arguments {
-    /// Distribution and version, in the following format: distro:version.
+    /// Source image reference: a distro image in the `distro:version` format (e.g. `fedora:42`),
+    /// or a committed/tagged container image.
     #[arg()]
-    distribution: String,
+    image_ref: String,
 
     /// Container name.
     #[arg()]
@@ -34,75 +33,30 @@ pub struct Arguments {
     #[arg(
         long = "mount",
         value_name = "HOST:CONTAINER[:MODE]",
-        help = "Bind mount a host path into the container (repeatable, relative paths allowed)"
+        help = "Bind mount a host path into the container (repeatable, relative paths allowed)",
+        value_parser = parse_validated_user_mount
     )]
     mounts: Vec<Mount>,
+
+    /// Publish a host port to the container in the form HOST:CONTAINER[/PROTOCOL].
+    /// PROTOCOL is `tcp` or `udp` and defaults to `tcp`. Pass --ports multiple times to
+    /// publish multiple ports.
+    #[arg(
+        long = "ports",
+        value_name = "HOST:CONTAINER/PROTOCOL",
+        help = "Publish a host port to the container (repeatable, defaults to TCP)"
+    )]
+    ports: Vec<Port>,
 }
 
-/// Handler for the "create" command.
+/// Creates a container from the supplied configuration.
 pub fn run(args: Arguments) -> Result<(), Box<dyn std::error::Error>> {
-    let user_uid = current_user_uid()?;
+    let config = Config {
+        image_ref: args.image_ref,
+        name: args.name,
+        mounts: args.mounts,
+        ports: args.ports,
+    };
 
-    let mut prepared_mounts: Vec<Mount> = Vec::with_capacity(args.mounts.len());
-
-    for mount in args.mounts {
-        let host = prepare_host_path(&mount.host, user_uid)?;
-        prepared_mounts.push(Mount {
-            host,
-            container: mount.container,
-            mode: mount.mode,
-        });
-    }
-
-    Podman::new()
-        .create(&prepared_mounts, &args.distribution, &args.name)
-        .map_err(Into::into)
-}
-
-/// Validate and canonicalize a user-supplied host path.
-///
-/// Strict semantics: the path must already exist (we do not auto-create), it must be
-/// owned by the current user, and after canonicalization it must not contain any `:`
-/// characters (which would be misparsed by podman's `--volume HOST:CONTAINER:MODE`
-/// argument
-fn prepare_host_path(host: &Path, user_uid: u32) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    if !host.exists() {
-        return Err(format!(
-            "Mount host path '{}' does not exist. Create it before running `podcell create`.",
-            host.display()
-        )
-        .into());
-    }
-
-    validate_host_path(host, user_uid)?;
-
-    let canonical = host.canonicalize().map_err(|e| {
-        format!(
-            "Failed to canonicalize mount host path '{}': {e}",
-            host.display()
-        )
-    })?;
-
-    if let Some(s) = canonical.to_str() {
-        if s.contains(':') {
-            return Err(format!(
-                "Mount host path '{}' canonicalizes to '{s}', which contains ':' \
-                 and would be misparsed by podman's --volume argument.",
-                host.display()
-            )
-            .into());
-        }
-    } else {
-        return Err(format!(
-            "Mount host path '{}' canonicalizes to a non-UTF-8 path",
-            host.display()
-        )
-        .into());
-    }
-
-    // Re-validate ownership on the canonical path: a symlink might have pointed at a
-    // path with different ownership than the link itself.
-    validate_host_path(&canonical, user_uid)?;
-
-    Ok(canonical)
+    Podman::new().create(&config).map_err(|error| error.into())
 }

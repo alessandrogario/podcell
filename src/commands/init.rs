@@ -6,7 +6,12 @@
 // the LICENSE file found in the root directory of this source tree.
 //
 
-use crate::utils::{group::EtcGroup, package_manager::PackageManager, passwd::EtcPasswd};
+use crate::utils::{
+    group::EtcGroup,
+    package_manager::PackageManager,
+    passwd::EtcPasswd,
+    podman::{Config, Podman},
+};
 
 use std::{
     fs, io,
@@ -191,14 +196,39 @@ fn initialize() -> std::io::Result<()> {
     let user_id_n: u32 = user_id.parse().map_err(|err| {
         io::Error::other(format!("USER_ID is not a valid u32: '{user_id}': {err}"))
     })?;
+
     let group_id_n: u32 = group_id.parse().map_err(|err| {
         io::Error::other(format!("GROUP_ID is not a valid u32: '{group_id}': {err}"))
     })?;
+
     chown_tree_xdev(Path::new(&home_path), user_id_n, group_id_n)?;
 
     print_bold("The initialization has completed!");
     std::fs::File::create(PODCELL_INIT_STATE_FILE_NAME)?;
 
+    Ok(())
+}
+
+/// Builds an image without `/.podcell` so the recreated container initializes and exits.
+pub fn generate_container_base_image(
+    podman: &Podman,
+    config: &Config,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let temp_image_ref = format!("localhost/podcell:{}-edit", config.name);
+    podman.commit(&config.name, &temp_image_ref)?;
+
+    let temp_dir = std::env::temp_dir().join(format!("podcell-edit-{}", config.name));
+    let dockerfile = format!(
+        "FROM {temp_image_ref}\nRUN echo 'Deinitializing the container...' && rm -f {PODCELL_INIT_STATE_FILE_NAME}\n"
+    );
+
+    std::fs::create_dir_all(&temp_dir)?;
+    std::fs::write(temp_dir.join("Dockerfile"), dockerfile)?;
+
+    podman.build(&temp_dir, &config.image_ref)?;
+    std::fs::remove_dir_all(&temp_dir)?;
+
+    podman.rmi(&temp_image_ref)?;
     Ok(())
 }
 

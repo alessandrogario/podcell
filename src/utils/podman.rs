@@ -8,14 +8,15 @@
 
 use crate::utils::{
     group::{EtcGroup, EtcGroupError},
-    mount::{Mount, MountRenderError},
+    mount::{Mount, MountMode, MountRenderError},
     passwd::{EtcPasswd, EtcPasswdError},
+    port::{Port, PortParseError},
 };
 
 use std::{
     env, io,
     os::unix::process::CommandExt,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, ExitStatus},
     string::FromUtf8Error,
 };
@@ -34,40 +35,57 @@ const ETC_PASSWD_PATH: &str = "/etc/passwd";
 /// Path to the /etc/group file.
 const ETC_GROUP_PATH: &str = "/etc/group";
 
+/// Errors returned by Podman operations and output parsing.
 #[derive(Error, Debug)]
 pub enum PodmanError {
+    /// Podman could not be executed.
     #[error("failed to execute podman")]
     IOError(#[from] io::Error),
 
+    /// Podman output was not valid UTF-8.
     #[error("podman has returned invalid UTF-8 output")]
     InvalidOutputEncoding(#[from] FromUtf8Error),
 
+    /// Podman output was not valid JSON.
     #[error("podman has returned invalid JSON output")]
     InvalidJSONOutput(#[from] serde_json::Error),
 
+    /// A required key was absent from Podman JSON output.
     #[error("the JSON returned by podman is missing a required field: {0}")]
     MissingJSONKey(String),
 
+    /// A Podman JSON field had an unexpected type.
     #[error("podman exited with failure (key: {key_name:?}, expected_type: {expected_type:?})")]
     InvalidJSONKeyType {
+        /// The field containing the invalid value.
         key_name: String,
+        /// The expected JSON type or format.
         expected_type: String,
     },
 
+    /// The requested podcell-managed container was not found.
     #[error("the following container is either missing or is not managed by podcell: {0}")]
     NotFound(String),
 
+    /// A Podman command returned a failure status.
     #[error("podman exited with failure (exit_status: {0:?})")]
     CommandError(ExitStatus),
 
+    /// Podman's group file could not be read or parsed.
     #[error("group file error")]
     EtcGroupError(#[from] EtcGroupError),
 
+    /// Podman's passwd file could not be read or parsed.
     #[error("passwd file error")]
     EtcPasswdError(#[from] EtcPasswdError),
 
+    /// A mount could not be rendered for Podman.
     #[error("failed to render mount as a podman --volume argument")]
     MountRenderError(#[from] MountRenderError),
+
+    /// A port binding from Podman could not be parsed.
+    #[error("invalid port binding in podman inspect output")]
+    PortParseError(#[from] PortParseError),
 }
 
 /// These states correspond to the lifecycle phases of a container as reported by Podman.
@@ -156,6 +174,19 @@ pub struct PodmanContainer {
     pub state: PodmanContainerState,
 }
 
+/// Container settings used by create and edit operations.
+#[derive(Debug, Clone)]
+pub struct Config {
+    /// Source image reference.
+    pub image_ref: String,
+    /// Container name.
+    pub name: String,
+    /// Bind mounts exposed to the container.
+    pub mounts: Vec<Mount>,
+    /// Ports published by the container.
+    pub ports: Vec<Port>,
+}
+
 /// Represents an interface to the Podman command-line tool.
 #[derive(Default)]
 pub struct Podman;
@@ -214,74 +245,8 @@ impl Podman {
         Ok(container_list)
     }
 
-    /// Returns the user-declared bind-mount source paths for a container by querying
-    /// `podman inspect`. Filters out our own binary mount at `/usr/bin/podcell`
-    pub fn list_user_bind_mount_sources(
-        &self,
-        container_id: &str,
-    ) -> Result<Vec<PathBuf>, PodmanError> {
-        let output = Command::new(PODMAN_EXECUTABLE_NAME)
-            .args(["inspect", "--type=container", container_id])
-            .stderr(std::process::Stdio::inherit())
-            .output()?;
-
-        if !output.status.success() {
-            return Err(PodmanError::CommandError(output.status));
-        }
-
-        let json: serde_json::Value = serde_json::from_str(&String::from_utf8(output.stdout)?)?;
-
-        let containers = json
-            .as_array()
-            .ok_or_else(|| PodmanError::InvalidJSONKeyType {
-                key_name: "(root)".to_owned(),
-                expected_type: "array".to_owned(),
-            })?;
-
-        let container = containers
-            .first()
-            .ok_or_else(|| PodmanError::NotFound(container_id.to_owned()))?;
-
-        let mounts = container
-            .get("Mounts")
-            .ok_or_else(|| PodmanError::MissingJSONKey("Mounts".to_owned()))?
-            .as_array()
-            .ok_or_else(|| PodmanError::InvalidJSONKeyType {
-                key_name: "Mounts".to_owned(),
-                expected_type: "array".to_owned(),
-            })?;
-
-        let mut sources = Vec::new();
-        for mount in mounts {
-            let mount_type = Self::get_json_object_string(mount, "Type")?;
-            if mount_type != "bind" {
-                continue;
-            }
-
-            let destination = Self::get_json_object_string(mount, "Destination")?;
-            if destination == PODCELL_MOUNT_PATH {
-                continue;
-            }
-
-            let source = Self::get_json_object_string(mount, "Source")?;
-            sources.push(PathBuf::from(source));
-        }
-
-        Ok(sources)
-    }
-
-    /// Creates a new container.
-    ///
-    /// `mounts` are rendered as `--volume HOST:CONTAINER:MODE,z` flags. Host paths are
-    /// expected to already be canonicalized AND validated by the caller; this method does
-    /// no IO on them. Sources are recovered at `start` time by querying podman directly
-    /// (see `list_user_bind_mount_sources`), so no additional bookkeeping is needed here.
-    pub fn create(
-        &self,
-        mounts: &[Mount],
-        distribution: &str,
-        name: &str,
-    ) -> Result<(), PodmanError> {
+    /// Creates a container from `config`.
+    pub fn create(&self, config: &Config) -> Result<(), PodmanError> {
         let mut cmd = Command::new(PODMAN_EXECUTABLE_NAME);
 
         cmd.arg("run")
@@ -290,13 +255,13 @@ impl Podman {
             .arg("--interactive")
             .args(["--label", "manager=podcell"])
             .args(["--hosts-file", "image"])
-            .arg(format!("--add-host={name}:127.0.0.1"))
-            .arg(format!("--add-host={name}:::1"));
+            .arg(format!("--add-host={}:127.0.0.1", config.name))
+            .arg(format!("--add-host={}:::1", config.name));
 
         cmd.arg("--network=pasta");
 
-        cmd.args(["--name", name])
-            .args(["--hostname", name])
+        cmd.args(["--name", &config.name])
+            .args(["--hostname", &config.name])
             .arg("--userns=keep-id")
             .arg("--user=0:0")
             .args(["--security-opt", "mask=/proc/acpi,/proc/kcore,/proc/keys,/proc/sched_debug,/proc/timer_list,/proc/timer_stats,/sys/firmware"])
@@ -317,9 +282,14 @@ impl Podman {
         ])
         .args(["--entrypoint", PODCELL_MOUNT_PATH]);
 
-        for mount in mounts {
-            let volume = mount.to_volume_arg()?;
+        for mount in &config.mounts {
+            let volume = mount.to_podman_volume_arg()?;
             cmd.args(["--volume", &volume]);
+        }
+
+        for port in &config.ports {
+            let publish = port.to_podman_publish_arg();
+            cmd.args(["--publish", &publish]);
         }
 
         if std::path::Path::new("/sys/fs/selinux/enforce").exists() {
@@ -361,9 +331,14 @@ impl Podman {
             &format!("GROUP_NAME={}", primary_group_name.name),
         ]);
 
-        Err(PodmanError::IOError(
-            cmd.arg(distribution).arg("init").exec(),
-        ))
+        cmd.arg(&config.image_ref).arg("init");
+
+        let status = cmd.status()?;
+        if !status.success() {
+            return Err(PodmanError::CommandError(status));
+        }
+
+        Ok(())
     }
 
     /// Looks up a podcell-managed container by name. Returns the full container record
@@ -469,12 +444,59 @@ impl Podman {
 
     /// Deletes a container by id. Replaces the current process with `podman rm`.
     pub fn rm_by_id(&self, container_id: &str) -> Result<(), PodmanError> {
-        let err = Command::new(PODMAN_EXECUTABLE_NAME)
+        let status = Command::new(PODMAN_EXECUTABLE_NAME)
             .arg("rm")
             .arg(container_id)
-            .exec();
+            .status()?;
 
-        Err(PodmanError::IOError(err))
+        if !status.success() {
+            return Err(PodmanError::CommandError(status));
+        }
+
+        Ok(())
+    }
+
+    /// Commits a container to an image.
+    pub fn commit(&self, container_id: &str, image_ref: &str) -> Result<(), PodmanError> {
+        let status = Command::new(PODMAN_EXECUTABLE_NAME)
+            .args(["commit", container_id, image_ref])
+            .status()?;
+
+        if !status.success() {
+            return Err(PodmanError::CommandError(status));
+        }
+
+        Ok(())
+    }
+
+    /// Builds and tags an image from a build context.
+    pub fn build(&self, context_dir: &Path, image_ref: &str) -> Result<(), PodmanError> {
+        let status = Command::new(PODMAN_EXECUTABLE_NAME)
+            .arg("build")
+            .arg("--tag")
+            .arg(image_ref)
+            .arg(context_dir)
+            .status()?;
+
+        if !status.success() {
+            return Err(PodmanError::CommandError(status));
+        }
+
+        Ok(())
+    }
+
+    /// Removes an image.
+    pub fn rmi(&self, image_ref: &str) -> Result<(), PodmanError> {
+        let status = Command::new(PODMAN_EXECUTABLE_NAME)
+            .arg("rmi")
+            .arg(image_ref)
+            .status()?;
+
+        if !status.success() {
+            return Err(PodmanError::CommandError(status));
+        }
+
+        Ok(())
     }
 
     /// Returns the specified string value from the given JSON object.
@@ -549,5 +571,158 @@ impl Podman {
                     .map(|string_ref| string_ref.to_owned())
             })
             .collect()
+    }
+
+    /// Reads a container's editable configuration.
+    pub fn inspect(&self, container_id: &str) -> Result<Config, PodmanError> {
+        let output = Command::new(PODMAN_EXECUTABLE_NAME)
+            .args(["inspect", "--type=container", container_id])
+            .stderr(std::process::Stdio::inherit())
+            .output()?;
+
+        if !output.status.success() {
+            return Err(PodmanError::CommandError(output.status));
+        }
+
+        let json: serde_json::Value = serde_json::from_str(&String::from_utf8(output.stdout)?)?;
+
+        let containers = json
+            .as_array()
+            .ok_or_else(|| PodmanError::InvalidJSONKeyType {
+                key_name: "(root)".to_owned(),
+                expected_type: "array".to_owned(),
+            })?;
+
+        let container = containers
+            .first()
+            .ok_or_else(|| PodmanError::NotFound(container_id.to_owned()))?;
+
+        let image_ref = Self::get_json_object_string(container, "ImageName")?;
+        let name = Self::get_json_object_string(container, "Name")?;
+        let mounts = Self::get_container_bind_mounts(container)?;
+        let ports = Self::get_container_ports(container)?;
+
+        Ok(Config {
+            image_ref,
+            name: name.trim_start_matches('/').to_owned(),
+            mounts,
+            ports,
+        })
+    }
+
+    /// Extracts all published port bindings from inspect output.
+    fn get_container_ports(container: &serde_json::Value) -> Result<Vec<Port>, PodmanError> {
+        let mut ports = Vec::new();
+
+        if let Some(port_bindings) = container
+            .get("HostConfig")
+            .and_then(|host_config| host_config.get("PortBindings"))
+            .and_then(|port_bindings| port_bindings.as_object())
+        {
+            for (key, bindings) in port_bindings {
+                let (container_port, protocol) =
+                    key.split_once('/')
+                        .ok_or_else(|| PodmanError::InvalidJSONKeyType {
+                            key_name: key.to_owned(),
+                            expected_type: "CONTAINER_PORT/PROTOCOL".to_owned(),
+                        })?;
+
+                let bindings =
+                    bindings
+                        .as_array()
+                        .ok_or_else(|| PodmanError::InvalidJSONKeyType {
+                            key_name: key.to_owned(),
+                            expected_type: "binding array".to_owned(),
+                        })?;
+
+                for binding in bindings {
+                    let host_port = Self::get_json_object_string(binding, "HostPort")?;
+                    let publish = format!("{host_port}:{container_port}/{protocol}");
+                    ports.push(publish.parse::<Port>().map_err(PodmanError::from)?);
+                }
+            }
+        }
+
+        Ok(ports)
+    }
+
+    /// Extracts user bind mounts from inspect output.
+    fn get_container_bind_mounts(container: &serde_json::Value) -> Result<Vec<Mount>, PodmanError> {
+        let mounts = container
+            .get("Mounts")
+            .ok_or_else(|| PodmanError::MissingJSONKey("Mounts".to_owned()))?
+            .as_array()
+            .ok_or_else(|| PodmanError::InvalidJSONKeyType {
+                key_name: "Mounts".to_owned(),
+                expected_type: "array".to_owned(),
+            })?;
+
+        let mut user_mounts = Vec::new();
+        for mount in mounts {
+            let mount_type = Self::get_json_object_string(mount, "Type")?;
+            if mount_type != "bind" {
+                continue;
+            }
+
+            let destination = Self::get_json_object_string(mount, "Destination")?;
+            if destination == PODCELL_MOUNT_PATH {
+                continue;
+            }
+
+            let source = Self::get_json_object_string(mount, "Source")?;
+            let read_write = mount
+                .get("RW")
+                .and_then(|read_write| read_write.as_bool())
+                .ok_or_else(|| PodmanError::InvalidJSONKeyType {
+                    key_name: "RW".to_owned(),
+                    expected_type: "boolean".to_owned(),
+                })?;
+
+            user_mounts.push(Mount {
+                host: PathBuf::from(source),
+                container: PathBuf::from(destination),
+                mode: if read_write {
+                    MountMode::Rw
+                } else {
+                    MountMode::Ro
+                },
+            });
+        }
+
+        Ok(user_mounts)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::utils::port::PortProtocol;
+
+    #[test]
+    fn get_container_ports_preserves_multiple_host_ports_for_one_container_port() {
+        let container = serde_json::json!({
+            "HostConfig": {
+                "PortBindings": {
+                    "80/tcp": [
+                        { "HostIp": "0.0.0.0", "HostPort": "8080" },
+                        { "HostIp": "0.0.0.0", "HostPort": "8081" }
+                    ]
+                }
+            }
+        });
+
+        let ports = Podman::get_container_ports(&container).unwrap();
+
+        assert_eq!(ports.len(), 2);
+        assert!(ports.contains(&Port {
+            host: 8080,
+            container: 80,
+            protocol: PortProtocol::Tcp,
+        }));
+        assert!(ports.contains(&Port {
+            host: 8081,
+            container: 80,
+            protocol: PortProtocol::Tcp,
+        }));
     }
 }

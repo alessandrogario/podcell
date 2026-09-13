@@ -6,9 +6,11 @@
 // the LICENSE file found in the root directory of this source tree.
 //
 
-use std::{path::PathBuf, str::FromStr};
+use crate::utils::system::{current_user_uid, is_path_owned_by_user};
 
 use thiserror::Error;
+
+use std::{path::PathBuf, str::FromStr};
 
 /// Access mode for a bind mount inside the container.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,10 +61,27 @@ pub enum MountRenderError {
     PathContainsColon { field: &'static str, path: String },
 }
 
+/// Errors produced when canonicalizing a `Mount`'s host path.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum MountCanonicalizeError {
+    #[error("could not canonicalize host path '{path}': {reason}")]
+    Canonicalize { path: String, reason: String },
+
+    #[error(
+        "canonicalized host path '{path}' contains ':', which would break podman's --volume parsing. \
+         This usually indicates a symlink resolved to a path with a colon in it."
+    )]
+    PathContainsColon { path: String },
+
+    #[error("canonicalized host path is not valid UTF-8: {path}")]
+    NonUtf8Path { path: String },
+}
+
 /// A user-supplied bind mount, parsed from a `--mount` argument.
 ///
-/// The container path is absolute; the host path may be relative, and is canonicalized by
-/// `commands::create::prepare_host_path` before reaching podman.
+/// The container path is absolute; the host path may be relative, and is not canonicalized
+/// by parsing. Call [`Mount::canonicalized`] to resolve the host path to an absolute,
+/// symlink-free path before validating or passing it to podman.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mount {
     pub host: PathBuf,
@@ -71,15 +90,72 @@ pub struct Mount {
 }
 
 impl Mount {
+    /// Resolve this mount's host path to an absolute, symlink-free path.
+    ///
+    /// Errors if the host path cannot be canonicalized, or if the canonicalized path is not
+    /// valid UTF-8 or contains a literal `:` (which would be misparsed by podman as a
+    /// volume-arg separator).
+    pub fn canonicalized(mut self) -> Result<Mount, MountCanonicalizeError> {
+        let canonical =
+            self.host
+                .canonicalize()
+                .map_err(|e| MountCanonicalizeError::Canonicalize {
+                    path: self.host.display().to_string(),
+                    reason: e.to_string(),
+                })?;
+
+        let host_str = canonical
+            .to_str()
+            .ok_or_else(|| MountCanonicalizeError::NonUtf8Path {
+                path: canonical.display().to_string(),
+            })?;
+
+        if host_str.contains(':') {
+            return Err(MountCanonicalizeError::PathContainsColon {
+                path: host_str.to_owned(),
+            });
+        }
+
+        self.host = canonical;
+        Ok(self)
+    }
+
     /// Render this mount as the value of a podman `--volume` argument.
     ///
     /// Errors if either path is not valid UTF-8 or contains a literal `:` (which
     /// would be misparsed by podman as a volume-arg separator).
-    pub fn to_volume_arg(&self) -> Result<String, MountRenderError> {
+    pub fn to_podman_volume_arg(&self) -> Result<String, MountRenderError> {
         let host = path_as_str(&self.host, "host")?;
         let container = path_as_str(&self.container, "container")?;
         Ok(format!("{host}:{container}:{},z", self.mode.as_str()))
     }
+}
+
+/// Parses a mount and validates its source for the current user.
+pub fn parse_validated_user_mount(
+    value: &str,
+) -> Result<Mount, Box<dyn std::error::Error + Send + Sync>> {
+    let mount: Mount = value.parse()?;
+    if !mount.host.exists() {
+        return Err(format!(
+            "Mount host path '{}' does not exist. Create it before mounting it.",
+            mount.host.display()
+        )
+        .into());
+    }
+
+    let mount = mount.canonicalized()?;
+    let user_id = current_user_uid()?;
+    if !is_path_owned_by_user(&mount.host, user_id)? {
+        return Err(format!(
+            "Mount host path '{:?}' is not owned by the current user ({user_id}). \
+             Refusing to mount: SELinux relabeling (:z) and rootless userns mapping both assume the path is user-owned.",
+            mount.host
+        )
+        .into());
+    }
+
+    Ok(mount)
 }
 
 fn path_as_str<'a>(
@@ -90,12 +166,14 @@ fn path_as_str<'a>(
         field,
         path: path.display().to_string(),
     })?;
+
     if s.contains(':') {
         return Err(MountRenderError::PathContainsColon {
             field,
             path: s.to_owned(),
         });
     }
+
     Ok(s)
 }
 
@@ -109,12 +187,14 @@ impl FromStr for Mount {
             [host, container] => (*host, *container, MountMode::Ro),
             [host, container, "ro"] => (*host, *container, MountMode::Ro),
             [host, container, "rw"] => (*host, *container, MountMode::Rw),
+
             [_, _, mode] => {
                 return Err(MountParseError::BadMode {
                     input: s.to_owned(),
                     got: (*mode).to_owned(),
                 });
             }
+
             _ => return Err(MountParseError::BadShape(s.to_owned())),
         };
 
@@ -124,6 +204,7 @@ impl FromStr for Mount {
                 field: "host",
             });
         }
+
         if container_str.is_empty() {
             return Err(MountParseError::EmptyPath {
                 input: s.to_owned(),
@@ -131,10 +212,10 @@ impl FromStr for Mount {
             });
         }
 
-        let host = PathBuf::from(host_str);
-        let container = PathBuf::from(container_str);
+        let host_path = PathBuf::from(host_str);
 
-        if !container.is_absolute() {
+        let container_path = PathBuf::from(container_str);
+        if !container_path.is_absolute() {
             return Err(MountParseError::RelativePath {
                 input: s.to_owned(),
                 field: "container",
@@ -143,8 +224,8 @@ impl FromStr for Mount {
         }
 
         Ok(Mount {
-            host,
-            container,
+            host: host_path,
+            container: container_path,
             mode,
         })
     }
@@ -311,7 +392,7 @@ mod tests {
     #[test]
     fn accepts_relative_host_rendering_verbatim() {
         let m = parse("foo:/bar:ro").unwrap();
-        assert_eq!(m.to_volume_arg().unwrap(), "foo:/bar:ro,z");
+        assert_eq!(m.to_podman_volume_arg().unwrap(), "foo:/bar:ro,z");
     }
 
     #[test]
@@ -344,7 +425,7 @@ mod tests {
             container: PathBuf::from("/bar"),
             mode: MountMode::Rw,
         };
-        assert_eq!(m.to_volume_arg().unwrap(), "/foo:/bar:rw,z");
+        assert_eq!(m.to_podman_volume_arg().unwrap(), "/foo:/bar:rw,z");
     }
 
     #[test]
@@ -354,13 +435,13 @@ mod tests {
             container: PathBuf::from("/bar"),
             mode: MountMode::Ro,
         };
-        assert_eq!(m.to_volume_arg().unwrap(), "/foo:/bar:ro,z");
+        assert_eq!(m.to_podman_volume_arg().unwrap(), "/foo:/bar:ro,z");
     }
 
     #[test]
     fn parse_then_render_roundtrip_appends_z() {
         let m: Mount = "/host:/cont:ro".parse().unwrap();
-        assert_eq!(m.to_volume_arg().unwrap(), "/host:/cont:ro,z");
+        assert_eq!(m.to_podman_volume_arg().unwrap(), "/host:/cont:ro,z");
     }
 
     #[test]
@@ -371,7 +452,7 @@ mod tests {
             mode: MountMode::Ro,
         };
         assert_eq!(
-            m.to_volume_arg(),
+            m.to_podman_volume_arg(),
             Err(MountRenderError::PathContainsColon {
                 field: "host",
                 path: "/has:colon".to_owned(),
@@ -387,7 +468,7 @@ mod tests {
             mode: MountMode::Ro,
         };
         assert_eq!(
-            m.to_volume_arg(),
+            m.to_podman_volume_arg(),
             Err(MountRenderError::PathContainsColon {
                 field: "container",
                 path: "/has:colon".to_owned(),
