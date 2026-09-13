@@ -9,6 +9,7 @@ A simple Podman-based development environment manager.
 ## Features
 
 - Create new containers for development, with arbitrary repeatable bind mounts
+- Edit an existing container's mounts and published ports
 - Start and stop containers as a discrete lifecycle step
 - Enter a running container from multiple terminals at once
 - Send files and directories into a running container via `/inbox`
@@ -38,6 +39,23 @@ podcell stop mybox
 # Remove it (must be stopped first).
 podcell rm mybox
 ```
+
+To change a container's bind mounts or published ports, you can edit it:
+
+```sh
+# Make sure the container is stopped first.
+podcell stop mybox
+
+# Add a port and a mount.
+podcell edit mybox --add-port 8080:80 --add-mount .:/mnt/work:rw
+
+# Drop a port and a mount (by host path).
+podcell edit mybox --del-port 8080 --del-mount /home/user/project
+```
+
+`podcell edit` takes the same `--mount` / port syntax as `podcell create`, applies the changes
+in order, and recreates the container so they take effect. Duplicate or missing ports/mounts
+are rejected. The container must be stopped before editing.
 
 The `--mount` flag takes `HOST:CONTAINER[:MODE]` where `MODE` is `ro` or `rw` (default `ro`).
 The `CONTAINER` path must be absolute.
