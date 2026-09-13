@@ -8,9 +8,27 @@
 
 use crate::utils::podman::{Podman, PodmanContainerState, PodmanError};
 
+use {clap::Args, thiserror::Error};
+
 use std::path::PathBuf;
 
-use clap::Args;
+/// Errors produced by the `send` command.
+#[derive(Debug, Error)]
+pub enum SendError {
+    #[error(transparent)]
+    Podman(#[from] PodmanError),
+
+    #[error("source path '{path}' does not exist")]
+    SourceMissing { path: PathBuf },
+
+    #[error(
+        "container '{name}' is in state '{state}', not 'running'; run `podcell start {name}` first"
+    )]
+    NotRunning {
+        name: String,
+        state: PodmanContainerState,
+    },
+}
 
 /// Path, inside the container, of the folder where sent items are placed.
 const INBOX_PATH: &str = "/inbox";
@@ -55,22 +73,19 @@ fn chown_inbox(podman: &Podman, container_id: &str) -> Result<(), PodmanError> {
 }
 
 /// Handler for the "send" command.
-pub fn run(args: Arguments) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(args: Arguments) -> Result<(), SendError> {
     if !args.source.exists() {
-        return Err(format!("Source path '{}' does not exist.", args.source.display()).into());
+        return Err(SendError::SourceMissing { path: args.source });
     }
 
     let podman = Podman::new();
     let container = podman.find_by_name(&args.name)?;
 
     if container.state != PodmanContainerState::Running {
-        return Err(format!(
-            "Container '{name}' is in state '{state}', not 'running'. \
-             Run `podcell start {name}` first.",
-            name = args.name,
-            state = container.state,
-        )
-        .into());
+        return Err(SendError::NotRunning {
+            name: args.name,
+            state: container.state,
+        });
     }
 
     println!("Sending '{}' to /inbox...", args.source.display());

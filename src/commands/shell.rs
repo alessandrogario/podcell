@@ -8,7 +8,17 @@
 
 use std::{io, os::unix::process::CommandExt, process::Command};
 
-use clap::Args;
+use {clap::Args, thiserror::Error};
+
+/// Errors produced by the hidden `shell` command.
+#[derive(Debug, Error)]
+pub enum ShellError {
+    #[error("failed to access the USERNAME environment variable: {0}")]
+    Username(#[source] std::env::VarError),
+
+    #[error("failed to execute the login shell: {0}")]
+    Execute(#[source] io::Error),
+}
 
 /// Open an interactive login shell inside the container.
 ///
@@ -18,18 +28,15 @@ use clap::Args;
 pub struct Arguments {}
 
 /// Handler for the "shell" command.
-pub fn run(_args: Arguments) -> Result<(), Box<dyn std::error::Error>> {
-    let username = std::env::var("USERNAME").map_err(|err| {
-        io::Error::other(format!(
-            "Failed to access the USERNAME environment variable: {err}"
-        ))
-    })?;
+pub fn run(_args: Arguments) -> Result<(), ShellError> {
+    let username = std::env::var("USERNAME").map_err(ShellError::Username)?;
 
-    Err(Command::new("sudo")
-        .arg("-H")
-        .arg("-i")
-        .arg("-u")
-        .arg(&username)
-        .exec()
-        .into())
+    Err(ShellError::Execute(
+        Command::new("sudo")
+            .arg("-H")
+            .arg("-i")
+            .arg("-u")
+            .arg(&username)
+            .exec(),
+    ))
 }

@@ -6,7 +6,7 @@
 // the LICENSE file found in the root directory of this source tree.
 //
 
-use crate::utils::system::{current_user_uid, is_path_owned_by_user};
+use crate::utils::system::{SystemError, current_user_uid, is_path_owned_by_user};
 
 use thiserror::Error;
 
@@ -62,10 +62,14 @@ pub enum MountRenderError {
 }
 
 /// Errors produced when canonicalizing a `Mount`'s host path.
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Error)]
 pub enum MountCanonicalizeError {
-    #[error("could not canonicalize host path '{path}': {reason}")]
-    Canonicalize { path: String, reason: String },
+    #[error("could not canonicalize host path '{path}': {source}")]
+    Canonicalize {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
 
     #[error(
         "canonicalized host path '{path}' contains ':', which would break podman's --volume parsing. \
@@ -75,6 +79,27 @@ pub enum MountCanonicalizeError {
 
     #[error("canonicalized host path is not valid UTF-8: {path}")]
     NonUtf8Path { path: String },
+}
+
+/// Errors produced while parsing and validating a user-supplied mount.
+#[derive(Debug, Error)]
+pub enum MountValidationError {
+    #[error(transparent)]
+    Parse(#[from] MountParseError),
+
+    #[error("mount host path '{path}' does not exist; create it before mounting it")]
+    HostPathMissing { path: PathBuf },
+
+    #[error(transparent)]
+    Canonicalize(#[from] MountCanonicalizeError),
+
+    #[error(transparent)]
+    System(#[from] SystemError),
+
+    #[error(
+        "mount host path '{path}' is not owned by the current user ({user_id}); refusing to mount: SELinux relabeling (:z) and rootless userns mapping both assume the path is user-owned"
+    )]
+    HostPathNotOwned { path: PathBuf, user_id: u32 },
 }
 
 /// A user-supplied bind mount, parsed from a `--mount` argument.
@@ -99,9 +124,9 @@ impl Mount {
         let canonical =
             self.host
                 .canonicalize()
-                .map_err(|e| MountCanonicalizeError::Canonicalize {
+                .map_err(|source| MountCanonicalizeError::Canonicalize {
                     path: self.host.display().to_string(),
-                    reason: e.to_string(),
+                    source,
                 })?;
 
         let host_str = canonical
@@ -132,27 +157,19 @@ impl Mount {
 }
 
 /// Parses a mount and validates its source for the current user.
-pub fn parse_validated_user_mount(
-    value: &str,
-) -> Result<Mount, Box<dyn std::error::Error + Send + Sync>> {
+pub fn parse_validated_user_mount(value: &str) -> Result<Mount, MountValidationError> {
     let mount: Mount = value.parse()?;
     if !mount.host.exists() {
-        return Err(format!(
-            "Mount host path '{}' does not exist. Create it before mounting it.",
-            mount.host.display()
-        )
-        .into());
+        return Err(MountValidationError::HostPathMissing { path: mount.host });
     }
 
     let mount = mount.canonicalized()?;
     let user_id = current_user_uid()?;
     if !is_path_owned_by_user(&mount.host, user_id)? {
-        return Err(format!(
-            "Mount host path '{:?}' is not owned by the current user ({user_id}). \
-             Refusing to mount: SELinux relabeling (:z) and rootless userns mapping both assume the path is user-owned.",
-            mount.host
-        )
-        .into());
+        return Err(MountValidationError::HostPathNotOwned {
+            path: mount.host,
+            user_id,
+        });
     }
 
     Ok(mount)

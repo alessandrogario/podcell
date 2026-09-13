@@ -9,15 +9,73 @@
 use crate::{
     commands::init::generate_container_base_image,
     utils::{
-        mount::{Mount, parse_validated_user_mount},
+        mount::{Mount, MountValidationError, parse_validated_user_mount},
         podman::{Config, Podman, PodmanContainerState},
-        port::Port,
+        port::{Port, PortParseError},
     },
 };
 
-use clap::Args;
+use {clap::Args, thiserror::Error};
 
-use std::path::PathBuf;
+use std::{num::ParseIntError, path::PathBuf};
+
+/// Errors produced while parsing edit operations.
+#[derive(Debug, Error)]
+pub enum EditParseError {
+    #[error("missing value after '{flag}' in edit commands")]
+    MissingValue { flag: String },
+
+    #[error("unknown edit command '{flag}'")]
+    UnknownCommand { flag: String },
+
+    #[error("invalid value for --add-port: {0}")]
+    AddPort(#[source] PortParseError),
+
+    #[error("invalid host port '{value}' for --del-port: {source}")]
+    DeletePort {
+        value: String,
+        #[source]
+        source: ParseIntError,
+    },
+
+    #[error("invalid value for --add-mount: {0}")]
+    AddMount(#[source] MountValidationError),
+}
+
+/// Errors produced while applying edit operations to a configuration.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum EditApplyError {
+    #[error("host port '{port}' is already published on container '{container}'")]
+    DuplicatePort { port: u16, container: String },
+
+    #[error("port '{port}' is not published on container '{container}'")]
+    PortNotFound { port: u16, container: String },
+
+    #[error("mount '{path}' is already present on container '{container}'")]
+    DuplicateMount { path: PathBuf, container: String },
+
+    #[error("mount '{path}' does not exist on container '{container}'")]
+    MountNotFound { path: PathBuf, container: String },
+}
+
+/// Errors produced by the `edit` command.
+#[derive(Debug, Error)]
+pub enum EditError {
+    #[error(transparent)]
+    Podman(#[from] crate::utils::podman::PodmanError),
+
+    #[error(transparent)]
+    Parse(#[from] EditParseError),
+
+    #[error(transparent)]
+    Apply(#[from] EditApplyError),
+
+    #[error("container '{name}' is running and cannot be edited")]
+    ContainerRunning { name: String },
+
+    #[error(transparent)]
+    GenerateImage(#[from] crate::commands::init::GenerateContainerBaseImageError),
+}
 
 /// A configuration change applied during container recreation.
 enum EditOperation {
@@ -62,26 +120,29 @@ pub struct Arguments {
 }
 
 /// Parses trailing edit arguments into ordered operations.
-fn parse_edit_commands(
-    edit_commands: &[String],
-) -> Result<Vec<EditOperation>, Box<dyn std::error::Error>> {
+fn parse_edit_commands(edit_commands: &[String]) -> Result<Vec<EditOperation>, EditParseError> {
     let mut operations = Vec::new();
     let mut tokens = edit_commands.iter();
 
     while let Some(flag) = tokens.next() {
         let value = tokens
             .next()
-            .ok_or_else(|| format!("Missing value after '{flag}' in edit commands"))?;
+            .ok_or_else(|| EditParseError::MissingValue { flag: flag.clone() })?;
 
         let operation = match flag.as_str() {
-            "--add-port" => EditOperation::AddPort(value.parse()?),
-            "--del-port" => EditOperation::DelPort(value.parse()?),
+            "--add-port" => EditOperation::AddPort(value.parse().map_err(EditParseError::AddPort)?),
+            "--del-port" => EditOperation::DelPort(value.parse().map_err(|source| {
+                EditParseError::DeletePort {
+                    value: value.clone(),
+                    source,
+                }
+            })?),
             "--add-mount" => EditOperation::AddMount(
-                parse_validated_user_mount(value).map_err(|error| error.to_string())?,
+                parse_validated_user_mount(value).map_err(EditParseError::AddMount)?,
             ),
             "--del-mount" => EditOperation::DelMount(PathBuf::from(value)),
 
-            _ => return Err(format!("Unknown edit command '{flag}'").into()),
+            _ => return Err(EditParseError::UnknownCommand { flag: flag.clone() }),
         };
 
         operations.push(operation);
@@ -91,7 +152,7 @@ fn parse_edit_commands(
 }
 
 /// Recreates a container with the requested configuration changes.
-pub fn run(args: Arguments) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(args: Arguments) -> Result<(), EditError> {
     if args.edit_commands.is_empty() {
         eprintln!("Nothing to do!");
         return Ok(());
@@ -112,11 +173,7 @@ pub fn run(args: Arguments) -> Result<(), Box<dyn std::error::Error>> {
         })
         .any(|container| container.name_list.contains(&args.name))
     {
-        return Err(format!(
-            "The following container is running and can't be edited: {}",
-            args.name
-        )
-        .into());
+        return Err(EditError::ContainerRunning { name: args.name });
     }
 
     let config = podman.inspect(&args.name)?;
@@ -137,7 +194,7 @@ pub fn run(args: Arguments) -> Result<(), Box<dyn std::error::Error>> {
 fn process_edit_args(
     mut config: Config,
     operations: Vec<EditOperation>,
-) -> Result<Config, Box<dyn std::error::Error>> {
+) -> Result<Config, EditApplyError> {
     for operation in operations {
         match operation {
             EditOperation::AddPort(port) => {
@@ -146,11 +203,10 @@ fn process_edit_args(
                     .iter()
                     .any(|existing| existing.host == port.host)
                 {
-                    return Err(format!(
-                        "Host port '{}' is already published on container '{}'",
-                        port.host, config.name
-                    )
-                    .into());
+                    return Err(EditApplyError::DuplicatePort {
+                        port: port.host,
+                        container: config.name,
+                    });
                 }
 
                 config.ports.push(port);
@@ -161,11 +217,9 @@ fn process_edit_args(
                     .ports
                     .iter()
                     .position(|port| port.host == host_port)
-                    .ok_or_else(|| {
-                        format!(
-                            "Port '{}' is not published on container '{}'",
-                            host_port, config.name
-                        )
+                    .ok_or_else(|| EditApplyError::PortNotFound {
+                        port: host_port,
+                        container: config.name.clone(),
                     })?;
 
                 config.ports.remove(position);
@@ -177,12 +231,10 @@ fn process_edit_args(
                     .iter()
                     .any(|existing| existing.host == mount.host)
                 {
-                    return Err(format!(
-                        "Mount '{}' is already present on container '{}'",
-                        mount.host.display(),
-                        config.name
-                    )
-                    .into());
+                    return Err(EditApplyError::DuplicateMount {
+                        path: mount.host,
+                        container: config.name,
+                    });
                 }
 
                 config.mounts.push(mount);
@@ -197,12 +249,9 @@ fn process_edit_args(
                     .mounts
                     .iter()
                     .position(|mount| mount.host == host_path)
-                    .ok_or_else(|| {
-                        format!(
-                            "Mount '{}' does not exist on container '{}'",
-                            host_path.display(),
-                            config.name
-                        )
+                    .ok_or_else(|| EditApplyError::MountNotFound {
+                        path: host_path.clone(),
+                        container: config.name.clone(),
                     })?;
 
                 config.mounts.remove(position);
@@ -228,7 +277,7 @@ mod tests {
 
     fn parse_edit_command_args(
         edit_commands: &[&str],
-    ) -> Result<Vec<EditOperation>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<EditOperation>, EditParseError> {
         let edit_commands = edit_commands
             .iter()
             .map(|argument| (*argument).to_owned())
@@ -308,7 +357,12 @@ mod tests {
         let missing =
             std::env::temp_dir().join(format!("podcell-missing-mount-{}", std::process::id()));
         let mount = format!("{}:/mnt", missing.display());
-        assert!(parse_edit_command_args(&["--add-mount", &mount]).is_err());
+        assert!(matches!(
+            parse_edit_command_args(&["--add-mount", &mount]),
+            Err(EditParseError::AddMount(
+                MountValidationError::HostPathMissing { path }
+            )) if path == missing
+        ));
     }
 
     #[test]
@@ -375,33 +429,102 @@ mod tests {
 
     #[test]
     fn unknown_flag_is_rejected() {
-        assert!(parse_edit_command_args(&["--bogus", "value"]).is_err());
+        assert!(matches!(
+            parse_edit_command_args(&["--bogus", "value"]),
+            Err(EditParseError::UnknownCommand { flag }) if flag == "--bogus"
+        ));
     }
 
     #[test]
     fn flag_without_value_is_rejected() {
-        assert!(parse_edit_command_args(&["--add-port"]).is_err());
+        assert!(matches!(
+            parse_edit_command_args(&["--add-port"]),
+            Err(EditParseError::MissingValue { flag }) if flag == "--add-port"
+        ));
     }
 
     #[test]
     fn malformed_port_is_rejected() {
-        assert!(parse_edit_command_args(&["--add-port", "notaport"]).is_err());
+        assert!(matches!(
+            parse_edit_command_args(&["--add-port", "notaport"]),
+            Err(EditParseError::AddPort(PortParseError::BadShape(input)))
+                if input == "notaport"
+        ));
     }
 
     #[test]
     fn non_numeric_del_port_is_rejected() {
-        assert!(parse_edit_command_args(&["--del-port", "abc"]).is_err());
+        assert!(matches!(
+            parse_edit_command_args(&["--del-port", "abc"]),
+            Err(EditParseError::DeletePort { value, .. }) if value == "abc"
+        ));
     }
 
     #[test]
     fn malformed_mount_is_rejected() {
-        assert!(parse_edit_command_args(&["--add-mount", "no-colon"]).is_err());
+        assert!(matches!(
+            parse_edit_command_args(&["--add-mount", "no-colon"]),
+            Err(EditParseError::AddMount(MountValidationError::Parse(
+                crate::utils::mount::MountParseError::BadShape(input)
+            ))) if input == "no-colon"
+        ));
     }
 
     #[test]
     fn invalid_mount_mode_is_rejected() {
         let host = temp_host_dir("bad-mode");
         let mount = format!("{}:/m:bogus", host.display());
-        assert!(parse_edit_command_args(&["--add-mount", &mount]).is_err());
+        assert!(matches!(
+            parse_edit_command_args(&["--add-mount", &mount]),
+            Err(EditParseError::AddMount(MountValidationError::Parse(
+                crate::utils::mount::MountParseError::BadMode { got, .. }
+            ))) if got == "bogus"
+        ));
+    }
+
+    #[test]
+    fn duplicate_port_reports_structured_apply_error() {
+        let config = Config {
+            image_ref: "fedora:42".to_owned(),
+            name: "dev".to_owned(),
+            mounts: Vec::new(),
+            ports: vec!["8080:80".parse().unwrap()],
+        };
+
+        let error = process_edit_args(
+            config,
+            vec![EditOperation::AddPort("8080:8080".parse().unwrap())],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            EditApplyError::DuplicatePort {
+                port: 8080,
+                container: "dev".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn missing_mount_reports_structured_apply_error() {
+        let config = Config {
+            image_ref: "fedora:42".to_owned(),
+            name: "dev".to_owned(),
+            mounts: Vec::new(),
+            ports: Vec::new(),
+        };
+
+        let path = PathBuf::from("/missing");
+        let error =
+            process_edit_args(config, vec![EditOperation::DelMount(path.clone())]).unwrap_err();
+
+        assert_eq!(
+            error,
+            EditApplyError::MountNotFound {
+                path,
+                container: "dev".to_owned(),
+            }
+        );
     }
 }

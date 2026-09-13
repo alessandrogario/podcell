@@ -6,7 +6,7 @@
 // the LICENSE file found in the root directory of this source tree.
 //
 
-use crate::utils::podman::{Podman, PodmanContainerState};
+use crate::utils::podman::{Podman, PodmanContainerState, PodmanError};
 
 use clap::Args;
 
@@ -19,7 +19,7 @@ pub struct Arguments {
 }
 
 /// Handler for the "stop" command.
-pub fn run(args: Arguments) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(args: Arguments) -> Result<(), PodmanError> {
     let podman = Podman::new();
     let container = podman.find_by_name(&args.name)?;
 
@@ -31,5 +31,5 @@ pub fn run(args: Arguments) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    podman.stop(&container.id).map_err(Into::into)
+    podman.stop(&container.id)
 }

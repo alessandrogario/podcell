@@ -6,17 +6,19 @@
 // the LICENSE file found in the root directory of this source tree.
 //
 
-use std::{
-    io,
-    path::{Path, PathBuf},
-};
+use thiserror::Error;
 
-pub fn which<P: AsRef<Path>>(command: P) -> io::Result<Option<PathBuf>> {
-    let path_var = std::env::var("PATH").map_err(|error| {
-        io::Error::other(format!(
-            "Failed to access the PATH environment variable: {error:?}"
-        ))
-    })?;
+use std::path::{Path, PathBuf};
+
+/// Errors produced while searching for executables in `PATH`.
+#[derive(Debug, Error)]
+pub enum WhichError {
+    #[error("failed to access the PATH environment variable")]
+    PathVariable(#[source] std::env::VarError),
+}
+
+pub fn which<P: AsRef<Path>>(command: P) -> Result<Option<PathBuf>, WhichError> {
+    let path_var = std::env::var("PATH").map_err(WhichError::PathVariable)?;
 
     for dir in path_var.split(':') {
         let bin_path = Path::new(dir).join(&command);

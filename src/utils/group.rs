@@ -6,13 +6,13 @@
 // the LICENSE file found in the root directory of this source tree.
 //
 
+use thiserror::Error;
+
 use std::{
     fs::File,
     io::{self, BufRead, BufReader},
     path::Path,
 };
-
-use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum EtcGroupError {

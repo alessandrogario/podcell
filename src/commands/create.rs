@@ -8,7 +8,7 @@
 
 use crate::utils::{
     mount::{Mount, parse_validated_user_mount},
-    podman::{Config, Podman},
+    podman::{Config, Podman, PodmanError},
     port::Port,
 };
 
@@ -50,7 +50,7 @@ pub struct Arguments {
 }
 
 /// Creates a container from the supplied configuration.
-pub fn run(args: Arguments) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(args: Arguments) -> Result<(), PodmanError> {
     let config = Config {
         image_ref: args.image_ref,
         name: args.name,
@@ -58,5 +58,5 @@ pub fn run(args: Arguments) -> Result<(), Box<dyn std::error::Error>> {
         ports: args.ports,
     };
 
-    Podman::new().create(&config).map_err(|error| error.into())
+    Podman::new().create(&config)
 }
